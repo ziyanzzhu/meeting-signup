@@ -31,8 +31,11 @@
       const d = await M.api.getWeek(qs.get('week'));
       if (!M.DEMO) M.store.set(CACHE_KEY, d);
       if (cached && JSON.stringify(cached) === JSON.stringify(d)) return;
-      apply(d);
-      if (!cached || S.step === 'select' || S.step === 'none' || S.step === 'closed') render();
+      const before = S.step + '|' + (S.week && S.week.id);
+      const rerouted = apply(d);
+      const after = S.step + '|' + (S.week && S.week.id);
+      // Don't redraw under a student who is typing, unless the week itself changed.
+      if (!cached || rerouted || before !== after || S.step === 'select' || S.step === 'none' || S.step === 'closed') render();
     } catch (e) {
       if (cached) return; // keep showing the saved copy
       S.step = 'error';
@@ -43,26 +46,35 @@
 
   function apply(d) {
     const prevStep = S.step;
+    const prevWeek = S.week && S.week.id;
     S.settings = d.settings;
     S.week = d.week;
     if (S.settings && S.settings.title) document.title = S.settings.title + (S.settings.name ? ' · ' + S.settings.name : '');
     if (!S.week) { S.step = 'none'; return; }
     if (!S.week.open) { S.step = 'closed'; return; }
-    if (!S.viewTz) {
-      const mine = M.browserTz();
-      S.viewTz = mine || S.settings.timezone;
-    }
+    if (!S.viewTz || !canConvert()) S.viewTz = canConvert() && M.browserTz() ? M.browserTz() : S.settings.timezone;
     computeView();
-    if (prevStep === 'loading' || prevStep === 'none' || prevStep === 'closed') {
+    if (prevStep === 'loading' || prevStep === 'none' || prevStep === 'closed' || prevWeek !== S.week.id) {
       const me = M.store.get('meet-me') || {};
-      S.form.name = S.form.name || me.name || '';
-      S.form.email = S.form.email || me.email || '';
+      S.sel = new Set(); S.saved = null; S.justSubmitted = false;
+      S.form = { name: me.name || '', email: me.email || '', topic: '', duration: null };
       const saved = M.store.get('meet-resp-' + S.week.id);
       if (saved) { S.saved = saved; loadSaved(); S.step = 'done'; } else { S.step = 'select'; }
+      return true;
     } else {
       const offered = new Set(S.week.slots);
       S.sel = new Set(Array.from(S.sel).filter((k) => offered.has(k)));
     }
+    return false;
+  }
+
+  // Older browsers may not know every time-zone name; then show the host's times unconverted.
+  function canConvert() {
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: S.settings.timezone });
+      if (M.browserTz()) new Intl.DateTimeFormat('en-US', { timeZone: M.browserTz() });
+      return true;
+    } catch (e) { return false; }
   }
 
   function computeView() {
@@ -78,7 +90,7 @@
 
   // ───────────── derived values ─────────────
   const inc = () => S.week.increment;
-  const needSlots = () => Math.max(1, Math.ceil(S.week.minMinutes / inc()));
+  const needSlots = () => Math.max(1, Math.min(S.week.slots.length, Math.ceil(S.week.minMinutes / inc())));
   const firstName = () => (S.form.name || '').trim().split(/\s+/)[0] || '';
   const hostName = () => (S.settings && S.settings.name) || '';
   const hostTz = () => S.settings.timezone;
@@ -134,7 +146,7 @@
 
   function tzLine() {
     const mine = M.browserTz();
-    const canSwitch = mine && mine !== hostTz();
+    const canSwitch = mine && mine !== hostTz() && canConvert();
     let sw = '';
     if (canSwitch) {
       sw = converted()
@@ -339,6 +351,7 @@
         '<div><dt>Available</dt><dd>' + S.sel.size + ' slot' + (S.sel.size === 1 ? '' : 's') + ' across ' + days + ' day' + (days === 1 ? '' : 's') + '</dd></div>' +
       '</dl>' +
       '<button type="button" class="btn" data-act="edit">Edit response</button>' +
+      '<button type="button" class="linkbtn" data-act="notme">Not ' + esc(r.name) + '? Start a new response</button>' +
       '</div>';
   }
 
@@ -365,6 +378,14 @@
       case 'edit':
         if (S.saved) loadSaved();
         S.justSubmitted = false; S.step = 'select'; render(); window.scrollTo(0, 0);
+        break;
+      case 'notme':
+        M.store.del('meet-resp-' + S.week.id);
+        M.store.del('meet-me');
+        M.store.set('meet-id', M.newId());
+        S.saved = null; S.justSubmitted = false; S.sel = new Set();
+        S.form = { name: '', email: '', topic: '', duration: null };
+        S.step = 'select'; render(); window.scrollTo(0, 0);
         break;
       case 'tz':
         readForm();

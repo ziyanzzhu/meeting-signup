@@ -51,6 +51,7 @@ function route_(req) {
   switch (req.action) {
     case 'getWeek': return getWeek_(req);
     case 'submit': {
+      rateLimit_('submit', 60);
       const res = withLock_(() => submit_(req));
       notify_(res.week, res.response, res.isUpdate);
       return { ok: true, response: res.response };
@@ -66,32 +67,59 @@ function route_(req) {
 
 function auth_(req) {
   if (!ADMIN_KEY || ADMIN_KEY === 'CHANGE-ME') throw new Error('Set ADMIN_KEY in the Apps Script, then redeploy. (admin key not set)');
-  if (String(req.key || '') !== ADMIN_KEY) throw new Error('Wrong admin key.');
+  if (String(req.key || '') !== ADMIN_KEY) { Utilities.sleep(1000); throw new Error('Wrong admin key.'); }
 }
 
+// Sheet writes are flushed before the lock is released (so the next writer sees them),
+// and cached copies are cleared only after that flush.
+let pendingForget_ = [];
 function withLock_(fn) {
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
-  try { return fn(); } finally { lock.releaseLock(); }
+  try {
+    return fn();
+  } finally {
+    try { SpreadsheetApp.flush(); } catch (e) { /* nothing pending */ }
+    if (pendingForget_.length) { forgetNow_(pendingForget_); pendingForget_ = []; }
+    lock.releaseLock();
+  }
+}
+
+function rateLimit_(what, perMinute) {
+  try {
+    const c = CacheService.getScriptCache();
+    const key = 'rate:' + what + ':' + Math.floor(Date.now() / 60000);
+    const n = Number(c.get(key) || 0) + 1;
+    c.put(key, String(n), 120);
+    if (n > perMinute) throw new Error('Lots of sign-ups right now. Please try again in a minute.');
+  } catch (e) {
+    if (/try again/.test(e.message)) throw e;
+  }
 }
 
 // ───────────── actions ─────────────
 function getWeek_(req) {
   const settings = loadSettings_();
-  const weeks = loadWeeks_();
-  const id = req.weekId ? String(req.weekId) : currentOpenWeekId_(weeks, settings.timezone);
-  const w = id && weeks[id];
+  const id = req.weekId ? String(req.weekId) : currentOpenWeekId_(openWeekIds_(), settings.timezone);
+  const w = id && DATE_RE.test(id) ? loadWeek_(id) : null;
   return { ok: true, week: w ? publicWeek(w) : null, settings: publicSettings(settings) };
 }
 
 function submit_(req) {
-  const weeks = loadWeeks_();
-  const w = weeks[String(req.weekId || '')];
+  const w = readWeeks_()[String(req.weekId || '')];
   const r = normalizeResponse(w, req.response);
   const sh = sheet_('Responses');
   const rows = readTable_('Responses');
-  let idx = rows.findIndex((x) => str_(x[0]) === w.id && str_(x[8]) === r.id);
-  if (idx < 0) idx = rows.findIndex((x) => str_(x[0]) === w.id && norm(str_(x[1])) === norm(r.name));
+  const sameWeek = (x) => str_(x[0]) === w.id;
+  const sameName = (x) => norm(str_(x[1])) === norm(r.name);
+  // Same browser + same name → update. Same name from another device → update, unless the
+  // saved response has a different email. A different name from the same browser (shared
+  // computer) → a new response, never overwriting someone else's.
+  let idx = rows.findIndex((x) => sameWeek(x) && str_(x[8]) === r.id && sameName(x));
+  if (idx < 0) idx = rows.findIndex((x) => sameWeek(x) && sameName(x) && (!str_(x[2]) || norm(str_(x[2])) === norm(r.email)));
+  if (idx < 0 && rows.some((x) => sameWeek(x) && str_(x[8]) === r.id)) r.id = newId();
+  if (idx < 0 && rows.filter(sameWeek).length >= 300) throw new Error('This week already has too many responses.');
+  if (idx >= 0) r.id = str_(rows[idx][8]) || r.id;
   const now = new Date();
   const submitted = idx >= 0 && rows[idx][6] ? rows[idx][6] : now;
   const row = [
@@ -107,9 +135,8 @@ function submit_(req) {
 }
 
 function adminLoad_(req) {
-  const weeks = loadWeeks_();
   const id = String(req.weekId || '');
-  return { ok: true, settings: loadSettings_(), week: weeks[id] || null, responses: responsesFor_(id) };
+  return { ok: true, settings: loadSettings_(), week: DATE_RE.test(id) ? loadWeek_(id) : null, responses: responsesFor_(id) };
 }
 
 function saveWeek_(req) {
@@ -123,17 +150,17 @@ function saveWeek_(req) {
   ];
   if (idx >= 0) sh.getRange(idx + 2, 1, 1, row.length).setValues([row]);
   else sh.getRange(sh.getLastRow() + 1, 1, 1, row.length).setValues([row]);
-  const s = loadSettings_();
+  const s = readSettings_();
   s.increment = w.increment;
   s.minMinutes = w.minMinutes;
-  if (req.site) s.site = req.site;
+  if (SITE_RE.test(String(req.site || ''))) s.site = req.site;
   writeSettings_(normalizeSettings(s));
-  forget_(['weeks', 'settings']);
+  forget_(['week:' + w.id, 'openIds', 'settings']);
   return { ok: true, week: w };
 }
 
 function saveSettings_(req) {
-  const s = normalizeSettings(Object.assign({}, loadSettings_(), req.settings || {}, req.site ? { site: req.site } : {}));
+  const s = normalizeSettings(Object.assign({}, readSettings_(), req.settings || {}, SITE_RE.test(String(req.site || '')) ? { site: req.site } : {}));
   writeSettings_(s);
   forget_(['settings']);
   return { ok: true, settings: s };
@@ -148,16 +175,24 @@ function deleteResponse_(req) {
 }
 
 // ───────────── cache (skips re-reading the Sheet for a few minutes) ─────────────
-const CACHE_SECONDS = 600;
+const CACHE_SECONDS = 120;
 function cached_(key, load) {
   const c = CacheService.getScriptCache();
-  const hit = c.get(key);
-  if (hit) { const v = safeJson_(hit, undefined); if (v !== undefined) return v; }
+  const got = c.getAll([key, 'gen']);
+  if (got[key] != null) { const v = safeJson_(got[key], undefined); if (v !== undefined) return v; }
+  const gen = got.gen || '';
   const v = load();
-  try { c.put(key, JSON.stringify(v), CACHE_SECONDS); } catch (e) { /* too big to cache: fine */ }
+  try { if ((c.get('gen') || '') === gen) c.put(key, JSON.stringify(v), CACHE_SECONDS); } catch (e) { /* too big to cache: fine */ }
   return v;
 }
-function forget_(keys) { try { CacheService.getScriptCache().removeAll(keys); } catch (e) { /* ignore */ } }
+function forget_(keys) { pendingForget_ = pendingForget_.concat(keys); } // applied after the flush in withLock_
+function forgetNow_(keys) {
+  try {
+    const c = CacheService.getScriptCache();
+    c.removeAll(keys);
+    c.put('gen', String(Date.now()) + Math.random(), 21600);
+  } catch (e) { /* ignore */ }
+}
 
 // ───────────── calendar busy times (free/busy only: no event titles) ─────────────
 function busy_(req) {
@@ -198,15 +233,11 @@ function notify_(w, r, isUpdate) {
     if (!to) return;
     const week = niceDate_(w.id);
     const link = s.site ? s.site.replace(/\/?$/, '/') + 'admin.html?week=' + w.id + '&tab=responses' : '';
-    const lines = [
-      r.name + (isUpdate ? ' updated their' : ' sent a') + ' meeting request for the week of ' + week + '.',
-      '',
-      'Time needed: ' + fmtDuration(r.duration),
-      'Topic: ' + r.topic,
-      'Available: ' + describeSlots_(r.slots, w.increment),
-    ];
+    const lines = [r.name + (isUpdate ? ' updated their' : ' sent a') + ' meeting request for the week of ' + week + '.'];
+    if (link) lines.push('All responses: ' + link);
+    lines.push('', 'Time needed: ' + fmtDuration(r.duration), 'Available: ' + describeSlots_(r.slots, w.increment));
     if (r.email) lines.push('Email: ' + r.email);
-    if (link) lines.push('', 'All responses: ' + link);
+    lines.push('Topic:', '    ' + r.topic.replace(/\r?\n/g, '\n    '));
     const mail = {
       to: to,
       subject: (isUpdate ? 'Updated: ' : 'New: ') + r.name + ' · ' + fmtDuration(r.duration) + ' · week of ' + week,
@@ -259,12 +290,18 @@ function iso_(v) {
 
 function safeJson_(s, dflt) { try { return JSON.parse(s); } catch (e) { return dflt; } }
 
-function loadWeeks_() { return cached_('weeks', readWeeks_); }
+function loadWeek_(id) { return cached_('week:' + id, () => readWeeks_()[id] || null); }
+function openWeekIds_() {
+  return cached_('openIds', () => {
+    const weeks = readWeeks_();
+    return Object.keys(weeks).filter((id) => weeks[id].open).sort();
+  });
+}
 function readWeeks_() {
   const out = {};
   readTable_('Weeks').forEach((row) => {
     const w = safeJson_(str_(row[6]), null);
-    if (w && w.id) out[w.id] = w;
+    if (w && w.id && !out[w.id]) out[w.id] = w; // first row wins, same row saveWeek_ updates
   });
   return out;
 }
@@ -302,10 +339,9 @@ function writeSettings_(s) {
   sh.getRange(2, 1, rows.length, 2).setValues(rows);
 }
 
-function currentOpenWeekId_(weeks, tz) {
-  const today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
-  const mon = mondayOf(today);
-  return Object.keys(weeks).filter((id) => weeks[id].open && id >= mon).sort()[0] || null;
+function currentOpenWeekId_(openIds, tz) {
+  const mon = mondayOf(Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd'));
+  return openIds.filter((id) => id >= mon)[0] || null;
 }
 
 function describeSlots_(slots, inc) {
@@ -334,7 +370,8 @@ function mondayOf(s) { return addDays(s, -((dow(s) + 6) % 7)); }
 const toMin = (hm) => { const p = hm.split(':').map(Number); return p[0] * 60 + p[1]; };
 const fromMin = (m) => pad(Math.floor(m / 60)) + ':' + pad(m % 60);
 const splitKey = (k) => [k.slice(0, 10), toMin(k.slice(11, 16))];
-const SLOT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+const SLOT_RE = /^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d$/;
+const SITE_RE = /^https:\/\/[\w.-]+(\/[\w.~%\/-]*)?$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 function fmtDuration(m) {
   m = Math.round(m);
@@ -369,6 +406,9 @@ function validTz(tz) {
   if (typeof tz !== 'string' || !/^[A-Za-z_]+(\/[A-Za-z0-9_+\-]+)*$/.test(tz)) return false;
   try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; } catch (e) { return typeof Intl === 'undefined'; }
 }
+function canonTz(tz) { // 'america/new_york' → 'America/New_York'
+  try { return new Intl.DateTimeFormat('en-US', { timeZone: tz }).resolvedOptions().timeZone || tz; } catch (e) { return tz; }
+}
 function hourStr(v, dflt) {
   const m = /^(\d{1,2}):00$/.exec(String(v || ''));
   return m && Number(m[1]) <= 24 ? pad(Number(m[1])) + ':00' : dflt;
@@ -381,7 +421,7 @@ function normalizeSettings(s) {
   return {
     name: clip(s.name, 80).trim(),
     title: clip(s.title, 80).trim() || DEFAULT_SETTINGS.title,
-    timezone: validTz(s.timezone) ? s.timezone : DEFAULT_SETTINGS.timezone,
+    timezone: validTz(s.timezone) ? canonTz(s.timezone) : DEFAULT_SETTINGS.timezone,
     increment: Number(s.increment) === 15 ? 15 : 30,
     minMinutes: clampInt(s.minMinutes, 0, 600, 90),
     dayStart: dayStart,
@@ -389,7 +429,7 @@ function normalizeSettings(s) {
     weekends: s.weekends === true,
     calendars: clip(s.calendars == null ? DEFAULT_SETTINGS.calendars : s.calendars, 500).trim(),
     notify: s.notify !== false,
-    site: /^https:\/\/[\w.-]+(\/[\w.~%\/-]*)?$/.test(String(s.site || '')) ? String(s.site).slice(0, 300) : '',
+    site: SITE_RE.test(String(s.site || '')) ? String(s.site).slice(0, 300) : '',
   };
 }
 function normalizeWeek(w) {
@@ -414,22 +454,23 @@ function normalizeResponse(week, r) {
   if (!week) throw new Error('This sign-up link is not active.');
   if (!week.open) throw new Error('Sign-ups for this week are closed.');
   r = r || {};
-  const name = clip(r.name, 80).trim();
+  const name = clip(r.name, 80).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim();
   if (!name) throw new Error('Please enter your name.');
-  const topic = clip(r.topic, 4000).trim();
+  const topic = clip(r.topic, 4000).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim();
   if (!topic) throw new Error('Please say what you would like to talk about.');
   const duration = Number(r.duration);
   if (!(duration >= 5 && duration <= 480)) throw new Error('Please choose how much time you need.');
+  if (Array.isArray(r.slots) && r.slots.length > 2000) throw new Error('Too many times selected.');
   const offered = new Set(week.slots);
   const slots = uniq((Array.isArray(r.slots) ? r.slots : []).map(String)).filter((k) => offered.has(k)).sort();
-  if (!slots.length || slots.length * week.increment < week.minMinutes) {
-    const need = Math.max(1, Math.ceil(week.minMinutes / week.increment));
+  const need = Math.max(1, Math.min(week.slots.length, Math.ceil(week.minMinutes / week.increment)));
+  if (slots.length < need) {
     throw new Error('Please choose at least ' + need + ' slot' + (need === 1 ? '' : 's') + ', and as many as possible.');
   }
   return {
     id: String(r.id || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) || newId(),
     name: name,
-    email: clip(r.email, 120).trim(),
+    email: clip(r.email, 120).replace(/[\s\u0000-\u001f\u007f]/g, ''),
     topic: topic,
     duration: Math.round(duration),
     slots: slots,

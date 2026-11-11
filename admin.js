@@ -67,6 +67,13 @@
     if (M.DEMO || !A.weekId) return;
     M.store.set(cacheKey(A.weekId), { ok: true, settings: A.settings, week: A.week, responses: A.responses });
   }
+  function clearAdminCache() {
+    try { Object.keys(localStorage).filter((k) => k.indexOf('meet-admin-cache-') === 0).forEach((k) => localStorage.removeItem(k)); } catch (e) { /* ignore */ }
+  }
+  // True while the week a request started on is still the one on screen.
+  const stillOn = (id, seq) => A.weekId === id && loadSeq === seq;
+  const draftKey = (d) => JSON.stringify([d.increment, d.minMinutes, Array.from(d.slots).sort(), d.open, d.note]);
+
   function applyLoaded(id, d) {
     A.settings = d.settings;
     A.weekId = id;
@@ -80,7 +87,8 @@
   async function load(id) {
     const seq = ++loadSeq;
     const first = !A.settings;
-    const cached = M.DEMO ? null : M.store.get(cacheKey(id));
+    const trusted = M.DEMO || M.store.get('meet-admin-key') === A.key; // key already verified here
+    const cached = M.DEMO || !trusted ? null : M.store.get(cacheKey(id));
     if (cached) { applyLoaded(id, cached); render(); }
     else if (first) root.innerHTML = '<div class="center"><div class="spinner" aria-label="Loading"></div></div>';
     else setBusy(true);
@@ -89,7 +97,8 @@
       if (seq !== loadSeq) return; // a newer week was opened meanwhile
       if (!M.DEMO) { M.store.set('meet-admin-key', A.key); M.store.set(cacheKey(id), d); }
       if (cached && JSON.stringify(cached) === JSON.stringify(d)) return;
-      if (cached && A.dirty) {
+      const lockedInc = (d.responses || []).length && d.week && A.draft && A.draft.increment !== d.week.increment;
+      if (cached && A.dirty && !lockedInc) {
         // You started editing before fresh data arrived: keep your edits, refresh everything else.
         A.settings = d.settings; A.week = d.week; A.responses = d.responses || [];
         A.schedule = null; A.focus = null;
@@ -101,7 +110,7 @@
     } catch (e) {
       if (seq !== loadSeq) return;
       if (/admin key/i.test(e.message)) {
-        A.key = ''; M.store.del('meet-admin-key');
+        A.key = ''; M.store.del('meet-admin-key'); clearAdminCache();
         renderLogin(e.message);
       } else if (cached) {
         M.toast('Showing saved data. Couldn’t refresh: ' + e.message);
@@ -274,16 +283,20 @@
   async function save() {
     const d = A.draft;
     if (!d.slots.size && !A.week) { M.toast('Mark at least one free time first.'); return; }
+    const need = Math.ceil(d.minMinutes / d.increment);
+    if (d.slots.size && d.slots.size < need &&
+        !confirm('You’re offering ' + d.slots.size + ' slot' + (d.slots.size === 1 ? '' : 's') + ', fewer than the minimum of ' + need + '. Students will be asked to pick all of them. Continue?')) return;
     const btn = document.getElementById('save');
     if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
     const first = !A.week;
+    const id = A.weekId, seq = loadSeq, sent = draftKey(d);
     try {
       const res = await M.api.saveWeek(A.key, {
-        id: A.weekId, increment: d.increment, minMinutes: d.minMinutes, slots: Array.from(d.slots), open: d.open, note: d.note,
+        id: id, increment: d.increment, minMinutes: d.minMinutes, slots: Array.from(d.slots), open: d.open, note: d.note,
       });
+      if (!stillOn(id, seq)) { M.store.del(cacheKey(id)); M.toast('Saved ' + M.fmtWeekRange(id)); return; }
       A.week = res.week;
-      A.draft = makeDraft(res.week);
-      A.dirty = false;
+      if (draftKey(A.draft) === sent) { A.draft = makeDraft(res.week); A.dirty = false; } // else keep edits made while saving
       A.settings.increment = res.week.increment;
       A.settings.minMinutes = res.week.minMinutes;
       cacheNow();
@@ -301,9 +314,10 @@
   }
 
   async function copyLast() {
-    const prev = M.addDays(A.weekId, -7);
+    const id = A.weekId, seq = loadSeq, prev = M.addDays(id, -7);
     try {
       const d = await M.api.adminLoad(A.key, prev);
+      if (!stillOn(id, seq)) return;
       if (!d.week || !d.week.slots.length) { M.toast('Last week has no times to copy.'); return; }
       if (A.draft.slots.size && !confirm('Replace this week’s times with last week’s?')) return;
       const shifted = d.week.slots.map((k) => M.addDays(k.slice(0, 10), 7) + k.slice(10));
@@ -381,6 +395,7 @@
             '<span>' + esc(M.fmtDay(it.date)) + ' · ' + esc(M.fmtRange(it.start, it.end)) + '</span></div></li>').join('') + '</ol>'
         : '<p class="muted small">No one could be placed.</p>') +
       (sc.unfit.length ? '<div class="unfit"><b>Couldn’t fit:</b> ' + sc.unfit.map((u) => esc(u.name) + ' (' + esc(u.reason) + ')').join('; ') + '</div>' : '') +
+      (sc.partial ? '<p class="muted small" style="margin-top:10px">Big group: this is the best arrangement found quickly, and a better one may exist.</p>' : '') +
       '<p class="muted small" style="margin-top:10px">A starting point only. Students aren’t notified, so send them their times.</p>' +
     '</div>';
   }
@@ -406,9 +421,17 @@
     });
     const order = people.filter((p) => p.cands.length).sort((a, b) => a.cands.length - b.cands.length);
     const used = new Set(), cur = [];
-    let best = { n: -1, pick: [] }, nodes = 0;
+    // Greedy first pass (shortest meetings first, earliest free spot) gives a good starting point.
+    const greedy = [];
+    order.slice().sort((a, b) => a.need - b.need || a.cands.length - b.cands.length).forEach((p) => {
+      const c = p.cands.find((x) => !x.cells.some((k) => used.has(k)));
+      if (c) { c.cells.forEach((k) => used.add(k)); greedy.push({ p: p, c: c }); }
+    });
+    used.clear();
+    let best = { n: greedy.length, pick: greedy }, nodes = 0, partial = false;
     (function dfs(i, n) {
-      if (best.n === order.length || nodes++ > 300000) return;
+      if (best.n === order.length) return;
+      if (nodes++ > 1500000) { partial = true; return; }
       if (n + (order.length - i) <= best.n) return;
       if (i === order.length) { best = { n: n, pick: cur.slice() }; return; }
       const p = order[i];
@@ -434,7 +457,7 @@
     }));
     const byCell = new Map();
     items.forEach((it) => it.cells.forEach((k) => byCell.set(k, it)));
-    return { items: items, unfit: unfit, byCell: byCell };
+    return { items: items, unfit: unfit, byCell: byCell, partial: partial };
   }
 
   function scheduleText() {
@@ -446,9 +469,11 @@
   }
 
   async function refresh(msg) {
+    const id = A.weekId, seq = loadSeq;
     setBusy(true);
     try {
-      const d = await M.api.adminLoad(A.key, A.weekId);
+      const d = await M.api.adminLoad(A.key, id);
+      if (!stillOn(id, seq)) return;
       A.responses = d.responses || [];
       if (!A.dirty) { A.week = d.week; A.draft = makeDraft(d.week); }
       A.schedule = null; A.focus = null; A.view = 'heat';
@@ -464,8 +489,10 @@
   async function deleteResp(id) {
     const r = A.responses.find((x) => x.id === id);
     if (!r || !confirm('Delete ' + r.name + '’s response? This can’t be undone.')) return;
+    const week = A.weekId, seq = loadSeq;
     try {
-      await M.api.deleteResponse(A.key, A.weekId, id);
+      await M.api.deleteResponse(A.key, week, id);
+      if (!stillOn(week, seq)) { M.store.del(cacheKey(week)); return; }
       A.responses = A.responses.filter((x) => x.id !== id);
       if (A.focus === id) A.focus = null;
       A.schedule = null; A.view = 'heat';
@@ -582,6 +609,7 @@
         touch: true,
         isOn: (el) => A.draft.slots.has(el.dataset.k),
         set: (el, on) => {
+          A.dirty = true;
           if (on) A.draft.slots.add(el.dataset.k); else A.draft.slots.delete(el.dataset.k);
         },
         after: () => cal.querySelectorAll('.col').forEach(paintAvailCol),
@@ -709,7 +737,7 @@
     };
     dlg.innerHTML =
       '<form method="dialog">' +
-        '<div class="dlg-head"><h2>Settings</h2><button class="btn ghost icon" value="cancel" aria-label="Close">' + icon('x') + '</button></div>' +
+        '<div class="dlg-head"><h2>Settings</h2><button type="button" class="btn ghost icon" data-dact="close" aria-label="Close">' + icon('x') + '</button></div>' +
         '<div class="dlg-body">' +
           '<div class="field"><label for="s-name">Your name <span class="opt">shown to students</span></label>' +
             '<input class="input" id="s-name" name="name" maxlength="80" value="' + esc(s.name) + '" placeholder="e.g. Prof. Smith"></div>' +
@@ -735,7 +763,7 @@
           (M.DEMO
             ? '<button type="button" class="linkbtn" data-dact="reset">Reset demo data</button>'
             : '<button type="button" class="linkbtn" data-dact="signout">Sign out on this browser</button>') +
-          '<div class="right"><button class="btn ghost" value="cancel">Cancel</button><button class="btn primary" value="save">Save</button></div>' +
+          '<div class="right"><button type="button" class="btn ghost" data-dact="close">Cancel</button><button class="btn primary" value="save">Save</button></div>' +
         '</div>' +
       '</form>';
     document.body.appendChild(dlg);
@@ -747,7 +775,8 @@
         A.dirty = false;
         location.reload();
       }
-      if (b.dataset.dact === 'signout') { M.store.del('meet-admin-key'); A.dirty = false; location.reload(); }
+      if (b.dataset.dact === 'signout') { M.store.del('meet-admin-key'); clearAdminCache(); A.dirty = false; location.reload(); }
+      if (b.dataset.dact === 'close') dlg.close('cancel');
     });
     dlg.addEventListener('close', async () => {
       if (dlg.returnValue !== 'save') return;

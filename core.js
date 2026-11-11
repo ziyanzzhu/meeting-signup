@@ -43,7 +43,8 @@
   const fromMin = (m) => pad(Math.floor(m / 60)) + ':' + pad(m % 60);
   const slotKey = (date, min) => date + 'T' + fromMin(min);
   const splitKey = (k) => [k.slice(0, 10), toMin(k.slice(11, 16))];
-  const SLOT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+  const SLOT_RE = /^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d$/;
+  const SITE_RE = /^https:\/\/[\w.-]+(\/[\w.~%\/-]*)?$/;
   const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
   // ───────────── formatting ─────────────
@@ -176,6 +177,9 @@
     if (typeof tz !== 'string' || !/^[A-Za-z_]+(\/[A-Za-z0-9_+\-]+)*$/.test(tz)) return false;
     try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; } catch (e) { return typeof Intl === 'undefined'; }
   }
+  function canonTz(tz) { // 'america/new_york' → 'America/New_York'
+    try { return new Intl.DateTimeFormat('en-US', { timeZone: tz }).resolvedOptions().timeZone || tz; } catch (e) { return tz; }
+  }
   function hourStr(v, dflt) {
     const m = /^(\d{1,2}):00$/.exec(String(v || ''));
     return m && Number(m[1]) <= 24 ? pad(Number(m[1])) + ':00' : dflt;
@@ -188,7 +192,7 @@
     return {
       name: clip(s.name, 80).trim(),
       title: clip(s.title, 80).trim() || DEFAULT_SETTINGS.title,
-      timezone: validTz(s.timezone) ? s.timezone : DEFAULT_SETTINGS.timezone,
+      timezone: validTz(s.timezone) ? canonTz(s.timezone) : DEFAULT_SETTINGS.timezone,
       increment: Number(s.increment) === 15 ? 15 : 30,
       minMinutes: clampInt(s.minMinutes, 0, 600, 90),
       dayStart: dayStart,
@@ -196,7 +200,7 @@
       weekends: s.weekends === true,
       calendars: clip(s.calendars == null ? DEFAULT_SETTINGS.calendars : s.calendars, 500).trim(),
       notify: s.notify !== false,
-      site: /^https:\/\/[\w.-]+(\/[\w.~%\/-]*)?$/.test(String(s.site || '')) ? String(s.site).slice(0, 300) : '',
+      site: SITE_RE.test(String(s.site || '')) ? String(s.site).slice(0, 300) : '',
     };
   }
   function normalizeWeek(w) {
@@ -221,22 +225,23 @@
     if (!week) throw new Error('This sign-up link is not active.');
     if (!week.open) throw new Error('Sign-ups for this week are closed.');
     r = r || {};
-    const name = clip(r.name, 80).trim();
+    const name = clip(r.name, 80).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim();
     if (!name) throw new Error('Please enter your name.');
-    const topic = clip(r.topic, 4000).trim();
+    const topic = clip(r.topic, 4000).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim();
     if (!topic) throw new Error('Please say what you would like to talk about.');
     const duration = Number(r.duration);
     if (!(duration >= 5 && duration <= 480)) throw new Error('Please choose how much time you need.');
+    if (Array.isArray(r.slots) && r.slots.length > 2000) throw new Error('Too many times selected.');
     const offered = new Set(week.slots);
     const slots = uniq((Array.isArray(r.slots) ? r.slots : []).map(String)).filter((k) => offered.has(k)).sort();
-    if (!slots.length || slots.length * week.increment < week.minMinutes) {
-      const need = Math.max(1, Math.ceil(week.minMinutes / week.increment));
+    const need = Math.max(1, Math.min(week.slots.length, Math.ceil(week.minMinutes / week.increment)));
+    if (slots.length < need) {
       throw new Error('Please choose at least ' + need + ' slot' + (need === 1 ? '' : 's') + ', and as many as possible.');
     }
     return {
       id: String(r.id || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) || newId(),
       name: name,
-      email: clip(r.email, 120).trim(),
+      email: clip(r.email, 120).replace(/[\s\u0000-\u001f\u007f]/g, ''),
       topic: topic,
       duration: Math.round(duration),
       slots: slots,
