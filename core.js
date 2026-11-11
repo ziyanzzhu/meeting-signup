@@ -276,6 +276,41 @@
     }
   }
 
+  // Demo only: fill a published week with a few made-up students so the Responses tab has
+  // something to show (in demo mode every "student" shares one browser, so you can't add several yourself).
+  function demoAddSamples(weekId) {
+    const db = store.get(DB_KEY) || {};
+    const w = db.weeks && db.weeks[weekId];
+    if (!w || !w.slots.length) throw new Error('Publish this week first.');
+    const people = [
+      ['Alex Rivera', 'Draft of the methods section, and whether the convergence test is enough.', 30],
+      ['Bea Novak', 'New results from this week; want feedback on the main figure.', 60],
+      ['Chen Li', 'Stuck on a bug in the fitting code. A quick check-in is fine.', 30],
+      ['Dana Okafor', 'Planning next semester and the conference abstract.', 90],
+    ];
+    const need = Math.max(1, Math.ceil(w.minMinutes / w.increment));
+    const blocks = toRanges(w.slots, w.increment);
+    db.responses = db.responses || {};
+    const list = (db.responses[weekId] || []).filter((r) => !/^sample-/.test(r.id));
+    people.forEach((p, i) => {
+      let picked = [];
+      const order = blocks.slice().sort(() => Math.random() - 0.5);
+      for (const b of order) {
+        if (picked.length >= need && Math.random() < 0.4) break;
+        const n = (b.end - b.start) / w.increment;
+        const len = Math.max(1, Math.ceil(n * (0.5 + Math.random() * 0.5)));
+        const off = Math.floor(Math.random() * (n - len + 1));
+        for (let j = 0; j < len; j++) picked.push(slotKey(b.date, b.start + (off + j) * w.increment));
+      }
+      if (picked.length < need) picked = w.slots.slice();
+      const t = new Date(Date.now() - (people.length - i) * 60000).toISOString();
+      list.push({ id: 'sample-' + (i + 1), name: p[0], email: '', topic: p[1], duration: p[2], slots: uniq(picked).sort(), submitted: t, updated: t });
+    });
+    db.responses[weekId] = list;
+    store.set(DB_KEY, db);
+    return people.length;
+  }
+
   // ───────────── API client ─────────────
   async function call(action, payload) {
     const body = Object.assign({ action: action }, payload || {});
@@ -404,7 +439,7 @@
   }
 
   window.Meet = {
-    DEMO, api, store, drag, icon, toast, copyText, esc, newId, uniq,
+    DEMO, api, store, drag, icon, toast, copyText, esc, newId, uniq, demoAddSamples,
     pad, parseYmd, fmtYmd, addDays, dow, mondayOf, localToday, todayIn, toMin, fromMin, slotKey, splitKey,
     DOW, DOW_LONG, MON, fmtTime, fmtHour, fmtRange, fmtDay, fmtWeekRange, fmtDuration, fmtStamp, tzLabel, browserTz, initials,
     toRanges, convertSlots, durationOptions,

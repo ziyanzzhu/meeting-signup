@@ -317,6 +317,9 @@
           (n
             ? '<div class="resp-list">' + sortedResponses().map(respCard).join('') + '</div>'
             : '<p class="muted small">No responses yet. Send students the link from the Availability tab.</p>') +
+          (M.DEMO
+            ? '<button class="btn sm block" data-act="samples" style="margin-top:12px">' + icon('users') + 'Add sample students (demo)</button>'
+            : '') +
         '</div>' +
       '</aside>' +
     '</div>';
@@ -413,7 +416,7 @@
     return lines.join('\n');
   }
 
-  async function refresh() {
+  async function refresh(msg) {
     setBusy(true);
     try {
       const d = await M.api.adminLoad(A.key, A.weekId);
@@ -421,7 +424,7 @@
       if (!A.dirty) { A.week = d.week; A.draft = makeDraft(d.week); }
       A.schedule = null; A.focus = null; A.view = 'heat';
       render();
-      M.toast('Up to date');
+      M.toast(msg || 'Up to date');
     } catch (e) {
       setBusy(false);
       M.toast(e.message);
@@ -734,6 +737,9 @@
         return;
       case 'refresh':
         return refresh();
+      case 'samples':
+        try { M.demoAddSamples(A.weekId); } catch (err) { M.toast(err.message); return; }
+        return refresh('Added 4 sample students. Try Suggest schedule');
       case 'suggest':
         A.schedule = suggest(); A.view = 'schedule'; A.focus = null; render();
         return;

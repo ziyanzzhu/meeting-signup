@@ -10,7 +10,7 @@ Students only ever see the website. Responses are stored in a Google Sheet behin
 
 ## Try it first (no setup)
 
-With `config.js` left empty, the site runs in **demo mode**: everything is saved in your own browser only. Open `admin.html` in a browser, publish a week, then click **Student view** to see what students get.
+With `config.js` left empty, the site runs in **demo mode**: everything is saved in your own browser only. Open `admin.html`, publish a week, then click **Student view** to see what students get. In demo mode every "student" is you in the same browser, so a second submission replaces the first. To see several students, open the **Responses** tab and click **Add sample students (demo)**, then **Suggest schedule**.
 
 ## One-time setup (about 10 minutes)
 
