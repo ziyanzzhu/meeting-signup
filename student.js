@@ -22,8 +22,6 @@
     error: '',
   };
 
-  start();
-
   // Show the last copy of this week instantly (if any), then refresh from the server.
   async function start() {
     const cached = M.DEMO ? null : M.store.get(CACHE_KEY);
@@ -382,4 +380,6 @@
     const allOn = pills.every((p) => S.sel.has(p.dataset.k));
     pills.forEach((p) => setPill(p, !allOn));
   }
+
+  start(); // last, so every helper above is defined before the first render
 })();

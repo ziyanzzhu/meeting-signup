@@ -168,6 +168,9 @@
     dayStart: '09:00',
     dayEnd: '18:00',
     weekends: false,
+    calendars: 'primary',
+    notify: true,
+    site: '',
   };
   function validTz(tz) {
     if (typeof tz !== 'string' || !/^[A-Za-z_]+(\/[A-Za-z0-9_+\-]+)*$/.test(tz)) return false;
@@ -191,6 +194,9 @@
       dayStart: dayStart,
       dayEnd: dayEnd,
       weekends: s.weekends === true,
+      calendars: clip(s.calendars == null ? DEFAULT_SETTINGS.calendars : s.calendars, 500).trim(),
+      notify: s.notify !== false,
+      site: /^https:\/\/[\w.-]+(\/[\w.~%\/-]*)?$/.test(String(s.site || '')) ? String(s.site).slice(0, 300) : '',
     };
   }
   function normalizeWeek(w) {
@@ -296,6 +302,8 @@
           store.set(DB_KEY, db);
           return { ok: true, settings: db.settings };
         }
+        case 'busy':
+          return { ok: true, busy: [], errors: [] };
         case 'deleteResponse': {
           const list = db.responses[req.weekId] || [];
           db.responses[req.weekId] = list.filter((x) => x.id !== req.id);
@@ -366,12 +374,14 @@
     if (!data.ok) throw new Error(data.error || 'Something went wrong.');
     return data;
   }
+  function siteBase() { try { return new URL('./', location.href).href; } catch (e) { return ''; } }
   const api = {
     getWeek: (weekId) => call('getWeek', { weekId: weekId || null }),
     submit: (weekId, response) => call('submit', { weekId: weekId, response: response }),
     adminLoad: (key, weekId) => call('adminLoad', { key: key, weekId: weekId }),
-    saveWeek: (key, week) => call('saveWeek', { key: key, week: week }),
-    saveSettings: (key, settings) => call('saveSettings', { key: key, settings: settings }),
+    saveWeek: (key, week) => call('saveWeek', { key: key, week: week, site: siteBase() }),
+    saveSettings: (key, settings) => call('saveSettings', { key: key, settings: settings, site: siteBase() }),
+    busy: (key, weekId) => call('busy', { key: key, weekId: weekId }),
     deleteResponse: (key, weekId, id) => call('deleteResponse', { key: key, weekId: weekId, id: id }),
   };
 

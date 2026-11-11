@@ -50,11 +50,16 @@ function setup() {
 function route_(req) {
   switch (req.action) {
     case 'getWeek': return getWeek_(req);
-    case 'submit': return withLock_(() => submit_(req));
+    case 'submit': {
+      const res = withLock_(() => submit_(req));
+      notify_(res.week, res.response, res.isUpdate);
+      return { ok: true, response: res.response };
+    }
     case 'adminLoad': auth_(req); return adminLoad_(req);
     case 'saveWeek': auth_(req); return withLock_(() => saveWeek_(req));
     case 'saveSettings': auth_(req); return withLock_(() => saveSettings_(req));
     case 'deleteResponse': auth_(req); return withLock_(() => deleteResponse_(req));
+    case 'busy': auth_(req); return busy_(req);
     default: throw new Error('Unknown action.');
   }
 }
@@ -95,9 +100,10 @@ function submit_(req) {
   ];
   if (idx >= 0) sh.getRange(idx + 2, 1, 1, row.length).setValues([row]);
   else sh.getRange(sh.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+  forget_(['resp:' + w.id]);
   r.submitted = iso_(submitted);
   r.updated = now.toISOString();
-  return { ok: true, response: r };
+  return { response: r, week: w, isUpdate: idx >= 0 };
 }
 
 function adminLoad_(req) {
@@ -120,13 +126,16 @@ function saveWeek_(req) {
   const s = loadSettings_();
   s.increment = w.increment;
   s.minMinutes = w.minMinutes;
-  writeSettings_(s);
+  if (req.site) s.site = req.site;
+  writeSettings_(normalizeSettings(s));
+  forget_(['weeks', 'settings']);
   return { ok: true, week: w };
 }
 
 function saveSettings_(req) {
-  const s = normalizeSettings(Object.assign({}, loadSettings_(), req.settings || {}));
+  const s = normalizeSettings(Object.assign({}, loadSettings_(), req.settings || {}, req.site ? { site: req.site } : {}));
   writeSettings_(s);
+  forget_(['settings']);
   return { ok: true, settings: s };
 }
 
@@ -134,7 +143,86 @@ function deleteResponse_(req) {
   const idx = readTable_('Responses').findIndex((x) => str_(x[0]) === String(req.weekId) && str_(x[8]) === String(req.id));
   if (idx < 0) throw new Error('That response was already deleted.');
   sheet_('Responses').deleteRow(idx + 2);
+  forget_(['resp:' + String(req.weekId)]);
   return { ok: true };
+}
+
+// ───────────── cache (skips re-reading the Sheet for a few minutes) ─────────────
+const CACHE_SECONDS = 600;
+function cached_(key, load) {
+  const c = CacheService.getScriptCache();
+  const hit = c.get(key);
+  if (hit) { const v = safeJson_(hit, undefined); if (v !== undefined) return v; }
+  const v = load();
+  try { c.put(key, JSON.stringify(v), CACHE_SECONDS); } catch (e) { /* too big to cache: fine */ }
+  return v;
+}
+function forget_(keys) { try { CacheService.getScriptCache().removeAll(keys); } catch (e) { /* ignore */ } }
+
+// ───────────── calendar busy times (free/busy only: no event titles) ─────────────
+function busy_(req) {
+  const s = loadSettings_();
+  const weekId = String(req.weekId || '');
+  if (!DATE_RE.test(weekId)) throw new Error('Invalid week.');
+  const ids = calendarIds_(s.calendars);
+  if (!ids.length) return { ok: true, busy: [], errors: [] };
+  let res;
+  try {
+    res = Calendar.Freebusy.query({
+      timeMin: parseYmd(addDays(weekId, -1)).toISOString(),
+      timeMax: parseYmd(addDays(weekId, 8)).toISOString(),
+      items: ids.map((id) => ({ id: id })),
+    });
+  } catch (e) {
+    return { ok: true, busy: [], errors: [{ id: '', reason: 'Calendar isn’t connected: ' + ((e && e.message) || e) }] };
+  }
+  const busy = [], errors = [];
+  ids.forEach((id) => {
+    const c = (res.calendars || {})[id] || {};
+    (c.errors || []).forEach((er) => errors.push({ id: id, reason: er.reason || 'error' }));
+    (c.busy || []).forEach((b) => busy.push({ start: wall_(b.start, s.timezone), end: wall_(b.end, s.timezone) }));
+  });
+  return { ok: true, busy: busy, errors: errors };
+}
+function calendarIds_(text) {
+  return uniq(String(text || '').split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean)).slice(0, 10);
+}
+function wall_(isoTime, tz) { return Utilities.formatDate(new Date(isoTime), tz, "yyyy-MM-dd'T'HH:mm"); }
+
+// ───────────── email to you when a student responds ─────────────
+function notify_(w, r, isUpdate) {
+  try {
+    const s = loadSettings_();
+    if (!s.notify) return;
+    const to = Session.getEffectiveUser().getEmail();
+    if (!to) return;
+    const week = niceDate_(w.id);
+    const link = s.site ? s.site.replace(/\/?$/, '/') + 'admin.html?week=' + w.id + '&tab=responses' : '';
+    const lines = [
+      r.name + (isUpdate ? ' updated their' : ' sent a') + ' meeting request for the week of ' + week + '.',
+      '',
+      'Time needed: ' + fmtDuration(r.duration),
+      'Topic: ' + r.topic,
+      'Available: ' + describeSlots_(r.slots, w.increment),
+    ];
+    if (r.email) lines.push('Email: ' + r.email);
+    if (link) lines.push('', 'All responses: ' + link);
+    const mail = {
+      to: to,
+      subject: (isUpdate ? 'Updated: ' : 'New: ') + r.name + ' · ' + fmtDuration(r.duration) + ' · week of ' + week,
+      body: lines.join('\n'),
+      name: 'Meeting sign-up',
+    };
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(r.email || '')) mail.replyTo = r.email;
+    MailApp.sendEmail(mail);
+  } catch (e) {
+    Logger.log('Email not sent: ' + ((e && e.message) || e));
+  }
+}
+function niceDate_(ymd) {
+  const M = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const d = parseYmd(ymd);
+  return M[d.getUTCMonth()] + ' ' + d.getUTCDate();
 }
 
 // ───────────── sheet storage ─────────────
@@ -171,7 +259,8 @@ function iso_(v) {
 
 function safeJson_(s, dflt) { try { return JSON.parse(s); } catch (e) { return dflt; } }
 
-function loadWeeks_() {
+function loadWeeks_() { return cached_('weeks', readWeeks_); }
+function readWeeks_() {
   const out = {};
   readTable_('Weeks').forEach((row) => {
     const w = safeJson_(str_(row[6]), null);
@@ -180,7 +269,8 @@ function loadWeeks_() {
   return out;
 }
 
-function responsesFor_(weekId) {
+function responsesFor_(weekId) { return cached_('resp:' + weekId, () => readResponses_(weekId)); }
+function readResponses_(weekId) {
   return readTable_('Responses')
     .filter((x) => str_(x[0]) === weekId)
     .map((x) => ({
@@ -195,7 +285,8 @@ function responsesFor_(weekId) {
     }));
 }
 
-function loadSettings_() {
+function loadSettings_() { return normalizeSettings(cached_('settings', readSettings_)); }
+function readSettings_() {
   const raw = {};
   readTable_('Settings').forEach((row) => {
     const k = str_(row[0]);
@@ -270,6 +361,9 @@ const DEFAULT_SETTINGS = {
   dayStart: '09:00',
   dayEnd: '18:00',
   weekends: false,
+  calendars: 'primary',
+  notify: true,
+  site: '',
 };
 function validTz(tz) {
   if (typeof tz !== 'string' || !/^[A-Za-z_]+(\/[A-Za-z0-9_+\-]+)*$/.test(tz)) return false;
@@ -293,6 +387,9 @@ function normalizeSettings(s) {
     dayStart: dayStart,
     dayEnd: dayEnd,
     weekends: s.weekends === true,
+    calendars: clip(s.calendars == null ? DEFAULT_SETTINGS.calendars : s.calendars, 500).trim(),
+    notify: s.notify !== false,
+    site: /^https:\/\/[\w.-]+(\/[\w.~%\/-]*)?$/.test(String(s.site || '')) ? String(s.site).slice(0, 300) : '',
   };
 }
 function normalizeWeek(w) {

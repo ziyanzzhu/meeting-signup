@@ -19,6 +19,7 @@
     focus: null,       // response id highlighted on the heatmap
     schedule: null,    // { items, unfit, byCell }
     who: new Map(),    // slot -> names (for tooltips)
+    busy: {},          // weekId -> { list: [{start, end}], errors, set, inc } from your calendars
   };
 
   let loadSeq = 0; // ignores slow replies for a week you've already navigated away from
@@ -31,7 +32,6 @@
 
   window.addEventListener('beforeunload', (e) => { if (A.dirty) { e.preventDefault(); e.returnValue = ''; } });
 
-  if (!A.key) renderLogin(); else load(A.weekId);
 
   // ───────────── helpers ─────────────
   function defaultWeek() {
@@ -208,6 +208,7 @@
               '>' + n + ' min</button>').join('') +
           '</div>' +
           '<span class="hint muted">Click and drag to mark when you’re free</span>' +
+          '<span class="busy-legend' + (busyErrors().length ? ' warn' : '') + '" id="busy-legend">' + busyLegend() + '</span>' +
           '<span class="spacer"></span>' +
           '<button class="btn sm ghost" data-act="copy-last">' + icon('copy') + 'Copy last week</button>' +
           '<button class="btn sm ghost" data-act="clear">Clear</button>' +
@@ -476,6 +477,62 @@
     }
   }
 
+  // ───────────── busy times from your calendars ─────────────
+  const NO_BUSY = new Set();
+  async function loadBusy(id) {
+    if (M.DEMO || A.busy[id]) return;
+    A.busy[id] = { list: [], errors: [], loading: true };
+    let entry;
+    try {
+      const d = await M.api.busy(A.key, id);
+      entry = { list: d.busy || [], errors: d.errors || [] };
+    } catch (e) {
+      // An older backend without calendar support answers "Unknown action": just show nothing.
+      entry = { list: [], errors: /unknown action/i.test(e.message) ? [] : [{ id: '', reason: e.message }] };
+    }
+    A.busy[id] = entry;
+    if (A.weekId === id && A.tab === 'avail') {
+      document.querySelectorAll('.cal .col').forEach(paintAvailCol);
+      const lg = document.getElementById('busy-legend');
+      if (lg) { lg.innerHTML = busyLegend(); lg.classList.toggle('warn', !!entry.errors.length); }
+    }
+  }
+  // Grid cells (at this week's slot length) that overlap a busy block.
+  function busySet() {
+    const b = A.busy[A.weekId];
+    if (!b || !b.list.length) return NO_BUSY;
+    const inc = A.draft.increment;
+    if (b.set && b.inc === inc) return b.set;
+    const set = new Set();
+    for (let i = 0; i < 7; i++) {
+      const d = M.addDays(A.weekId, i);
+      const dayStart = d + 'T00:00', dayEnd = M.addDays(d, 1) + 'T00:00';
+      b.list.forEach((x) => {
+        if (x.end <= dayStart || x.start >= dayEnd) return;
+        for (let m = 0; m < 1440; m += inc) {
+          const s0 = M.slotKey(d, m), s1 = d + 'T' + M.fromMin(m + inc);
+          if (x.start < s1 && x.end > s0) set.add(s0);
+        }
+      });
+    }
+    b.set = set; b.inc = inc;
+    return set;
+  }
+  function busyErrors() { return (A.busy[A.weekId] || {}).errors || []; }
+  function busyLegend() {
+    const b = A.busy[A.weekId];
+    if (!b || b.loading) return '';
+    if (b.errors.length) {
+      const e = b.errors[0];
+      const msg = e.reason === 'notFound' || e.reason === 'notAuthorized'
+        ? 'Can’t see ' + e.id + '. Share it with this Google account (free/busy is enough)'
+        : e.reason;
+      return icon('calendar') + '<span title="' + esc(msg) + '">' + esc(msg.length > 70 ? msg.slice(0, 70) + '…' : msg) + '</span>';
+    }
+    if (!b.list.length) return '';
+    return '<span class="sw"></span>Busy on your calendar';
+  }
+
   // ───────────── week grid ─────────────
   function gridDays(slots) {
     const weekend = A.settings.weekends || slots.some((k) => [0, 6].includes(M.dow(k.slice(0, 10))));
@@ -519,6 +576,7 @@
     const cal = host.firstChild;
     if (isAvail) {
       cal.querySelectorAll('.col').forEach(paintAvailCol);
+      if (!A.busy[A.weekId]) loadBusy(A.weekId);
       M.drag.attach(cal.querySelector('.cal-body'), {
         selector: '.cell',
         touch: true,
@@ -538,11 +596,13 @@
   function paintAvailCol(col) {
     const cells = col.children, inc = A.draft.increment;
     const on = (i) => i >= 0 && i < cells.length && A.draft.slots.has(cells[i].dataset.k);
+    const bs = busySet();
     for (let i = 0; i < cells.length; i++) {
       const c = cells[i], o = on(i);
       c.classList.toggle('on', o);
       c.classList.toggle('top', o && !on(i - 1));
       c.classList.toggle('bot', o && !on(i + 1));
+      c.classList.toggle('busy', bs.has(c.dataset.k));
       let lbl = '';
       if (o && !on(i - 1)) {
         let j = i;
@@ -665,6 +725,11 @@
             '<div class="field"><label for="s-end">Calendar ends</label><select class="input" id="s-end" name="dayEnd">' + hourOpts(s.dayEnd, 1, 24) + '</select></div>' +
           '</div>' +
           '<label class="check"><input type="checkbox" name="weekends"' + (s.weekends ? ' checked' : '') + '> Show weekends</label>' +
+          (M.DEMO ? '' :
+            '<div class="field"><label for="s-cal">Calendars to show as busy</label>' +
+              '<input class="input" id="s-cal" name="calendars" maxlength="500" value="' + esc(s.calendars) + '" placeholder="primary">' +
+              '<span class="help">“primary” is this Google account’s own calendar. To add your BC calendar, share it with this Google account (“See only free/busy”), then add its address here. Separate with commas.</span></div>' +
+            '<label class="check"><input type="checkbox" name="notify"' + (s.notify ? ' checked' : '') + '> Email me when a student responds</label>') +
         '</div>' +
         '<div class="dlg-foot">' +
           (M.DEMO
@@ -694,11 +759,13 @@
         dayStart: f.namedItem('dayStart').value,
         dayEnd: f.namedItem('dayEnd').value,
         weekends: f.namedItem('weekends').checked,
+        ...(M.DEMO ? {} : { calendars: f.namedItem('calendars').value, notify: f.namedItem('notify').checked }),
       };
       if (M.toMin(next.dayEnd) <= M.toMin(next.dayStart)) { M.toast('The calendar has to end after it starts.'); return; }
       try {
         const res = await M.api.saveSettings(A.key, next);
         A.settings = res.settings;
+        A.busy = {}; // calendars may have changed
         cacheNow();
         render();
         M.toast('Settings saved');
@@ -785,4 +852,7 @@
         return deleteResp(el.dataset.id);
     }
   }
+
+  // Start last, so every helper above is defined before the first render.
+  if (!A.key) renderLogin(); else load(A.weekId);
 })();
