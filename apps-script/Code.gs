@@ -327,7 +327,7 @@ function normalizeResponse(week, r) {
   const slots = uniq((Array.isArray(r.slots) ? r.slots : []).map(String)).filter((k) => offered.has(k)).sort();
   if (!slots.length || slots.length * week.increment < week.minMinutes) {
     const need = Math.max(1, Math.ceil(week.minMinutes / week.increment));
-      throw new Error('Please choose at least ' + need + ' slot' + (need === 1 ? '' : 's') + ', and as many as possible.');
+    throw new Error('Please choose at least ' + need + ' slot' + (need === 1 ? '' : 's') + ', and as many as possible.');
   }
   return {
     id: String(r.id || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) || newId(),
