@@ -43,6 +43,17 @@ Use a **personal Gmail account**. University-managed Google accounts often block
    - Your page: `…/admin.html`. It asks for the admin key once per browser.
    - Student links look like `…/?week=2026-11-16`. The bare `…/` link always opens the current open week.
 
+## Calendar busy times and email alerts
+
+- **Busy times.** The availability grid shows gray striped blocks wherever your Google Calendar is busy. Only free/busy is read, never event titles. If a time you offer overlaps a busy block, it gets red stripes. The calendars it checks are listed under ⚙︎ Settings → *Calendars to show as busy*. `primary` means the calendar of the Google account that owns the Apps Script.
+- **Adding a work or university calendar.**
+  1. In that calendar's Google Calendar settings, go to **Share with specific people** and add the Google account that owns the script with **See only free/busy**.
+  2. Copy the calendar's ID (under *Integrate calendar*; for your main calendar it's your email address).
+  3. Add the ID to the Settings list, separated by a comma.
+  4. If the site can't read a calendar, an orange note appears above the grid.
+- **Email alerts.** Each new or updated response emails the Google account that owns the script. The email has the student's name, time needed, topic, availability and a link to the Responses tab. Replying goes to the student if they gave an email. Turn alerts off in ⚙︎ Settings.
+- These features need the permissions listed in [`apps-script/appsscript.json`](apps-script/appsscript.json): this spreadsheet only, read-only calendar, send email as you, and your email address. To set them up, paste that file in the editor after turning on *Project Settings → Show "appsscript.json" manifest file*.
+
 ## Each week
 
 1. Open `admin.html`. Use ‹ › to pick the week.
