@@ -5,11 +5,14 @@
   const { esc, icon } = M;
   const app = document.getElementById('app');
   const qs = new URLSearchParams(location.search);
+  const CACHE_KEY = 'meet-cache-' + (qs.get('week') || 'current');
 
   const S = {
     step: 'loading',          // loading | select | details | done | none | closed | error
     settings: null,
     week: null,
+    viewTz: null,             // time zone the times are shown in (student's own by default)
+    view: new Map(),          // slot key → { date, min, t } on the viewTz wall clock
     sel: new Set(),
     form: { name: '', email: '', topic: '', duration: null },
     saved: null,              // the response on file for this browser
@@ -21,33 +24,52 @@
 
   start();
 
+  // Show the last copy of this week instantly (if any), then refresh from the server.
   async function start() {
+    const cached = M.DEMO ? null : M.store.get(CACHE_KEY);
+    if (cached) apply(cached);
     render();
     try {
       const d = await M.api.getWeek(qs.get('week'));
-      S.settings = d.settings;
-      S.week = d.week;
-      if (S.settings && S.settings.title) document.title = S.settings.title + (S.settings.name ? ' · ' + S.settings.name : '');
-      if (!S.week) S.step = 'none';
-      else if (!S.week.open) S.step = 'closed';
-      else {
-        const me = M.store.get('meet-me') || {};
-        S.form.name = me.name || '';
-        S.form.email = me.email || '';
-        const saved = M.store.get('meet-resp-' + S.week.id);
-        if (saved) {
-          S.saved = saved;
-          loadSaved();
-          S.step = 'done';
-        } else {
-          S.step = 'select';
-        }
-      }
+      if (!M.DEMO) M.store.set(CACHE_KEY, d);
+      if (cached && JSON.stringify(cached) === JSON.stringify(d)) return;
+      apply(d);
+      if (!cached || S.step === 'select' || S.step === 'none' || S.step === 'closed') render();
     } catch (e) {
+      if (cached) return; // keep showing the saved copy
       S.step = 'error';
       S.error = e.message;
+      render();
     }
-    render();
+  }
+
+  function apply(d) {
+    const prevStep = S.step;
+    S.settings = d.settings;
+    S.week = d.week;
+    if (S.settings && S.settings.title) document.title = S.settings.title + (S.settings.name ? ' · ' + S.settings.name : '');
+    if (!S.week) { S.step = 'none'; return; }
+    if (!S.week.open) { S.step = 'closed'; return; }
+    if (!S.viewTz) {
+      const mine = M.browserTz();
+      S.viewTz = mine || S.settings.timezone;
+    }
+    computeView();
+    if (prevStep === 'loading' || prevStep === 'none' || prevStep === 'closed') {
+      const me = M.store.get('meet-me') || {};
+      S.form.name = S.form.name || me.name || '';
+      S.form.email = S.form.email || me.email || '';
+      const saved = M.store.get('meet-resp-' + S.week.id);
+      if (saved) { S.saved = saved; loadSaved(); S.step = 'done'; } else { S.step = 'select'; }
+    } else {
+      const offered = new Set(S.week.slots);
+      S.sel = new Set(Array.from(S.sel).filter((k) => offered.has(k)));
+    }
+  }
+
+  function computeView() {
+    S.view = new Map();
+    S.week.slots.forEach((k) => S.view.set(k, M.slotIn(k, S.settings.timezone, S.viewTz)));
   }
 
   function loadSaved() {
@@ -61,9 +83,23 @@
   const needSlots = () => Math.max(1, Math.ceil(S.week.minMinutes / inc()));
   const firstName = () => (S.form.name || '').trim().split(/\s+/)[0] || '';
   const hostName = () => (S.settings && S.settings.name) || '';
+  const hostTz = () => S.settings.timezone;
+  const converted = () => S.viewTz !== hostTz();
   function weekSpan() {
-    const weekend = S.week.slots.some((k) => [0, 6].includes(M.dow(k.slice(0, 10))));
-    return M.fmtWeekRange(S.week.id, weekend ? 7 : 5);
+    const dates = Array.from(S.view.values()).map((v) => v.date).sort();
+    if (!dates.length) return M.fmtWeekRange(S.week.id);
+    return M.fmtDateSpan(dates[0], dates[dates.length - 1]);
+  }
+  // Selected slots merged into ranges, in the time zone shown on screen.
+  function viewRanges() {
+    const items = Array.from(S.sel).map((k) => S.view.get(k)).filter(Boolean).sort((a, b) => a.t - b.t);
+    const out = [];
+    items.forEach((v) => {
+      const last = out[out.length - 1];
+      if (last && last.date === v.date && last.end === v.min) last.end += inc();
+      else out.push({ date: v.date, start: v.min, end: v.min + inc() });
+    });
+    return out;
   }
 
   // ───────────── render ─────────────
@@ -98,10 +134,21 @@
     return '<div class="msg-card">' + avatar() + '<h1>' + title + '</h1><p class="muted">' + body + '</p></div>';
   }
 
+  function tzLine() {
+    const mine = M.browserTz();
+    const canSwitch = mine && mine !== hostTz();
+    let sw = '';
+    if (canSwitch) {
+      sw = converted()
+        ? '<small class="tz-note">Converted from ' + esc(M.tzLabel(hostTz())) + '. <button type="button" class="linkbtn" data-act="tz">Show ' + esc(M.tzLabel(hostTz())) + '</button></small>'
+        : '<small class="tz-note"><button type="button" class="linkbtn" data-act="tz">Show my time zone (' + esc(M.tzLabel(mine)) + ')</button></small>';
+    }
+    return '<li>' + icon('globe') + '<span>' + esc(M.tzLabel(S.viewTz)) + sw + '</span></li>';
+  }
+
   function infoPanel() {
     const s = S.settings, w = S.week;
-    const tzDiff = M.browserTz() && M.browserTz() !== s.timezone;
-    const ranges = M.toRanges(Array.from(S.sel), inc());
+    const ranges = viewRanges();
     const showPicked = S.step !== 'select' && ranges.length;
     return '<aside class="booker-info">' +
       avatar() +
@@ -110,7 +157,7 @@
       '<ul class="meta">' +
         '<li>' + icon('calendar') + '<span>' + esc(weekSpan()) + '</span></li>' +
         '<li>' + icon('clock') + '<span>' + w.increment + '-minute slots</span></li>' +
-        '<li>' + icon('globe') + '<span>' + esc(M.tzLabel(s.timezone)) + (tzDiff ? '<small>Not your computer’s time zone</small>' : '') + '</span></li>' +
+        tzLine() +
       '</ul>' +
       (w.note ? '<p class="note">' + esc(w.note) + '</p>' : '') +
       (showPicked
@@ -129,11 +176,11 @@
 
   // ───────────── step 1: pick times ─────────────
   function selectView() {
-    const byDay = new Map();
+    const byDay = new Map(); // local date → [{ k, min }]
     S.week.slots.forEach((k) => {
-      const [d, m] = M.splitKey(k);
-      if (!byDay.has(d)) byDay.set(d, []);
-      byDay.get(d).push(m);
+      const v = S.view.get(k);
+      if (!byDay.has(v.date)) byDay.set(v.date, []);
+      byDay.get(v.date).push({ k: k, min: v.min, t: v.t });
     });
     const days = Array.from(byDay.keys()).sort();
     const need = needSlots();
@@ -144,12 +191,12 @@
       return '<div class="main-head"><h2>No times posted yet</h2><p class="muted">Check back soon.</p></div>';
     }
     const cols = days.map((d) => {
-      const mins = byDay.get(d).sort((a, b) => a - b);
-      const pills = mins.map((m, i) => {
-        const k = M.slotKey(d, m);
-        const on = S.sel.has(k);
-        const gap = i > 0 && m !== mins[i - 1] + inc();
-        return '<button type="button" class="pill' + (on ? ' on' : '') + (gap ? ' gap' : '') + '" data-k="' + k + '" aria-pressed="' + on + '">' + M.fmtTime(m) + '</button>';
+      const items = byDay.get(d).sort((a, b) => a.t - b.t);
+      const pills = items.map((it, i) => {
+        const on = S.sel.has(it.k);
+        const gap = i > 0 && it.t !== items[i - 1].t + inc() * 60000;
+        return '<button type="button" class="pill' + (on ? ' on' : '') + (gap ? ' gap' : '') + '" data-k="' + it.k +
+          '" data-ld="' + d + '" data-lm="' + it.min + '" aria-pressed="' + on + '">' + M.fmtTime(it.min) + '</button>';
       }).join('');
       const dd = M.parseYmd(d);
       return '<div class="day">' +
@@ -175,6 +222,7 @@
     if (!days) return;
     M.drag.attach(days, {
       selector: '.pill',
+      coords: (el) => [el.dataset.ld, Number(el.dataset.lm)],
       isOn: (el) => S.sel.has(el.dataset.k),
       set: (el, on) => setPill(el, on),
       onEnd: updateBar,
@@ -247,7 +295,7 @@
     const f = S.form;
     if (!f.name.trim()) return fail('Please enter your name.');
     if (!f.topic.trim()) return fail('Please say what you would like to talk about.');
-    if (!f.duration) return fail('Please choose how much time you think you need.');
+    if (!f.duration || !M.durationOptions(inc()).includes(f.duration)) return fail('Please choose how much time you think you need.');
     if (f.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.email.trim())) return fail('That email address doesn’t look right.');
     S.busy = true; S.formError = ''; render();
     try {
@@ -279,7 +327,7 @@
   // ───────────── step 3: done ─────────────
   function doneView() {
     const r = S.saved;
-    const days = new Set(r.slots.map((k) => k.slice(0, 10))).size;
+    const days = new Set(Array.from(S.sel).map((k) => (S.view.get(k) || {}).date)).size;
     const who = hostName() || 'Your advisor';
     const head = S.justSubmitted
       ? '<h2>You’re all set' + (firstName() ? ', ' + esc(firstName()) : '') + '</h2><p class="muted">' + esc(who) + ' will confirm a meeting time with you.</p>'
@@ -290,7 +338,7 @@
         '<div><dt>Name</dt><dd>' + esc(r.name) + '</dd></div>' +
         '<div><dt>Topic</dt><dd>' + esc(r.topic) + '</dd></div>' +
         '<div><dt>Time needed</dt><dd>' + esc(M.fmtDuration(r.duration)) + '</dd></div>' +
-        '<div><dt>Available</dt><dd>' + r.slots.length + ' slot' + (r.slots.length === 1 ? '' : 's') + ' across ' + days + ' day' + (days === 1 ? '' : 's') + '</dd></div>' +
+        '<div><dt>Available</dt><dd>' + S.sel.size + ' slot' + (S.sel.size === 1 ? '' : 's') + ' across ' + days + ' day' + (days === 1 ? '' : 's') + '</dd></div>' +
       '</dl>' +
       '<button type="button" class="btn" data-act="edit">Edit response</button>' +
       '</div>';
@@ -320,11 +368,17 @@
         if (S.saved) loadSaved();
         S.justSubmitted = false; S.step = 'select'; render(); window.scrollTo(0, 0);
         break;
+      case 'tz':
+        readForm();
+        S.viewTz = converted() ? hostTz() : M.browserTz();
+        computeView();
+        render();
+        break;
     }
   });
 
   function toggleDay(d) {
-    const pills = Array.from(app.querySelectorAll('.pill')).filter((p) => p.dataset.k.startsWith(d));
+    const pills = Array.from(app.querySelectorAll('.pill')).filter((p) => p.dataset.ld === d);
     const allOn = pills.every((p) => S.sel.has(p.dataset.k));
     pills.forEach((p) => setPill(p, !allOn));
   }

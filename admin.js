@@ -21,6 +21,9 @@
     who: new Map(),    // slot -> names (for tooltips)
   };
 
+  let loadSeq = 0; // ignores slow replies for a week you've already navigated away from
+  const cacheKey = (id) => 'meet-admin-cache-' + id;
+
   const qs = new URLSearchParams(location.search);
   const qWeek = qs.get('week');
   A.weekId = qWeek && /^\d{4}-\d{2}-\d{2}$/.test(qWeek) ? M.mondayOf(qWeek) : defaultWeek();
@@ -46,7 +49,7 @@
   function makeDraft(w) {
     return w
       ? { increment: w.increment, minMinutes: w.minMinutes, slots: new Set(w.slots), open: w.open, note: w.note || '' }
-      : { increment: A.settings.increment, minMinutes: A.settings.minMinutes, slots: new Set(), open: true, note: '' };
+      : { increment: 15, minMinutes: A.settings.minMinutes, slots: new Set(), open: true, note: '' };
   }
   function sortedResponses() {
     return A.responses.slice().sort((a, b) => String(a.submitted).localeCompare(String(b.submitted)));
@@ -59,25 +62,49 @@
   function hideTip() { const t = document.getElementById('tip'); if (t) t.hidden = true; }
 
   // ───────────── loading ─────────────
+  // Shows this week's data from the last visit instantly (if any), then refreshes from the server.
+  function cacheNow() {
+    if (M.DEMO || !A.weekId) return;
+    M.store.set(cacheKey(A.weekId), { ok: true, settings: A.settings, week: A.week, responses: A.responses });
+  }
+  function applyLoaded(id, d) {
+    A.settings = d.settings;
+    A.weekId = id;
+    A.week = d.week;
+    A.responses = d.responses || [];
+    A.draft = makeDraft(d.week);
+    A.dirty = false; A.focus = null; A.schedule = null; A.view = 'heat';
+    syncUrl();
+  }
+
   async function load(id) {
+    const seq = ++loadSeq;
     const first = !A.settings;
-    if (first) root.innerHTML = '<div class="center"><div class="spinner" aria-label="Loading"></div></div>';
+    const cached = M.DEMO ? null : M.store.get(cacheKey(id));
+    if (cached) { applyLoaded(id, cached); render(); }
+    else if (first) root.innerHTML = '<div class="center"><div class="spinner" aria-label="Loading"></div></div>';
     else setBusy(true);
     try {
       const d = await M.api.adminLoad(A.key, id);
-      if (!M.DEMO) M.store.set('meet-admin-key', A.key);
-      A.settings = d.settings;
-      A.weekId = id;
-      A.week = d.week;
-      A.responses = d.responses || [];
-      A.draft = makeDraft(d.week);
-      A.dirty = false; A.focus = null; A.schedule = null; A.view = 'heat';
-      syncUrl();
+      if (seq !== loadSeq) return; // a newer week was opened meanwhile
+      if (!M.DEMO) { M.store.set('meet-admin-key', A.key); M.store.set(cacheKey(id), d); }
+      if (cached && JSON.stringify(cached) === JSON.stringify(d)) return;
+      if (cached && A.dirty) {
+        // You started editing before fresh data arrived: keep your edits, refresh everything else.
+        A.settings = d.settings; A.week = d.week; A.responses = d.responses || [];
+        A.schedule = null; A.focus = null;
+        if (A.tab === 'resp') render();
+        return;
+      }
+      applyLoaded(id, d);
       render();
     } catch (e) {
+      if (seq !== loadSeq) return;
       if (/admin key/i.test(e.message)) {
         A.key = ''; M.store.del('meet-admin-key');
         renderLogin(e.message);
+      } else if (cached) {
+        M.toast('Showing saved data. Couldn’t refresh: ' + e.message);
       } else if (first) {
         root.innerHTML = '<div class="msg-card"><h1>Couldn’t load</h1><p class="muted">' + esc(e.message) + '</p><button class="btn" onclick="location.reload()">Try again</button></div>';
       } else {
@@ -258,6 +285,7 @@
       A.dirty = false;
       A.settings.increment = res.week.increment;
       A.settings.minMinutes = res.week.minMinutes;
+      cacheNow();
       render();
       if (first) {
         const ok = await M.copyText(studentLink());
@@ -423,6 +451,7 @@
       A.responses = d.responses || [];
       if (!A.dirty) { A.week = d.week; A.draft = makeDraft(d.week); }
       A.schedule = null; A.focus = null; A.view = 'heat';
+      cacheNow();
       render();
       M.toast(msg || 'Up to date');
     } catch (e) {
@@ -439,6 +468,7 @@
       A.responses = A.responses.filter((x) => x.id !== id);
       if (A.focus === id) A.focus = null;
       A.schedule = null; A.view = 'heat';
+      cacheNow();
       render();
       M.toast('Response deleted');
     } catch (e) {
@@ -669,6 +699,7 @@
       try {
         const res = await M.api.saveSettings(A.key, next);
         A.settings = res.settings;
+        cacheNow();
         render();
         M.toast('Settings saved');
       } catch (e) {

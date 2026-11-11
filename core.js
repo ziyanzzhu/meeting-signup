@@ -62,8 +62,12 @@
     return (long ? DOW_LONG : DOW)[d.getUTCDay()] + ', ' + MON[d.getUTCMonth()] + ' ' + d.getUTCDate();
   }
   function fmtWeekRange(weekId, nDays) {
-    const a = parseYmd(weekId), b = parseYmd(addDays(weekId, (nDays || 5) - 1));
+    return fmtDateSpan(weekId, addDays(weekId, (nDays || 5) - 1));
+  }
+  function fmtDateSpan(from, to) {
+    const a = parseYmd(from), b = parseYmd(to);
     const y = b.getUTCFullYear();
+    if (from === to) return MON[a.getUTCMonth()] + ' ' + a.getUTCDate() + ', ' + y;
     if (a.getUTCFullYear() !== y) return MON[a.getUTCMonth()] + ' ' + a.getUTCDate() + ', ' + a.getUTCFullYear() + ' – ' + MON[b.getUTCMonth()] + ' ' + b.getUTCDate() + ', ' + y;
     if (a.getUTCMonth() !== b.getUTCMonth()) return MON[a.getUTCMonth()] + ' ' + a.getUTCDate() + ' – ' + MON[b.getUTCMonth()] + ' ' + b.getUTCDate() + ', ' + y;
     return MON[a.getUTCMonth()] + ' ' + a.getUTCDate() + ' – ' + b.getUTCDate() + ', ' + y;
@@ -86,6 +90,36 @@
     } catch (e) { return tz; }
   }
   function browserTz() { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) { return ''; } }
+
+  // ───────────── time-zone conversion (for showing students their own local time) ─────────────
+  const tzFmt = {};
+  function zonedParts(tz, t) { // wall clock in tz at instant t (ms) → { date, min }
+    const f = tzFmt[tz] || (tzFmt[tz] = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    }));
+    const p = {};
+    f.formatToParts(new Date(t)).forEach((x) => { p[x.type] = x.value; });
+    return { date: p.year + '-' + p.month + '-' + p.day, min: (Number(p.hour) % 24) * 60 + Number(p.minute) };
+  }
+  function wallToUtc(date, min, tz) { // instant (ms) when the wall clock in tz reads date + min
+    const want = Date.UTC(Number(date.slice(0, 4)), Number(date.slice(5, 7)) - 1, Number(date.slice(8, 10)), 0, min);
+    let t = want;
+    for (let i = 0; i < 3; i++) {
+      const p = zonedParts(tz, t);
+      const seen = Date.UTC(Number(p.date.slice(0, 4)), Number(p.date.slice(5, 7)) - 1, Number(p.date.slice(8, 10)), 0, p.min);
+      if (seen === want) break;
+      t -= seen - want;
+    }
+    return t;
+  }
+  // A slot key written in hostTz, as { date, min, t } on the wall clock of viewTz.
+  function slotIn(key, hostTz, viewTz) {
+    const [d, m] = splitKey(key);
+    let t;
+    try { t = wallToUtc(d, m, hostTz); } catch (e) { return { date: d, min: m, t: Date.UTC(2000, 0, 1, 0, m) }; }
+    if (!viewTz || viewTz === hostTz) return { date: d, min: m, t: t };
+    try { const p = zonedParts(viewTz, t); return { date: p.date, min: p.min, t: t }; } catch (e) { return { date: d, min: m, t: t }; }
+  }
   function initials(name) {
     const words = String(name || '').replace(/\b(prof|professor|dr|mr|ms|mrs)\.?\s+/gi, '').trim().split(/\s+/).filter(Boolean);
     if (!words.length) return '';
@@ -351,11 +385,12 @@
     let cur = null;
     let lastType = 'mouse';
     function applyRect(c, target) {
-      const a = splitKey(c.anchor.dataset.k), b = splitKey(target.dataset.k);
+      const pos = c.o.coords || ((el) => splitKey(el.dataset.k)); // [day, minutes] as shown on screen
+      const a = pos(c.anchor), b = pos(target);
       const d0 = a[0] < b[0] ? a[0] : b[0], d1 = a[0] < b[0] ? b[0] : a[0];
       const m0 = Math.min(a[1], b[1]), m1 = Math.max(a[1], b[1]);
       c.items.forEach((el) => {
-        const k = splitKey(el.dataset.k);
+        const k = pos(el);
         const inside = k[0] >= d0 && k[0] <= d1 && k[1] >= m0 && k[1] <= m1;
         const want = inside ? c.mode : c.before.get(el);
         if (c.o.isOn(el) !== want) c.o.set(el, want);
@@ -441,7 +476,8 @@
   window.Meet = {
     DEMO, api, store, drag, icon, toast, copyText, esc, newId, uniq, demoAddSamples,
     pad, parseYmd, fmtYmd, addDays, dow, mondayOf, localToday, todayIn, toMin, fromMin, slotKey, splitKey,
-    DOW, DOW_LONG, MON, fmtTime, fmtHour, fmtRange, fmtDay, fmtWeekRange, fmtDuration, fmtStamp, tzLabel, browserTz, initials,
+    DOW, DOW_LONG, MON, fmtTime, fmtHour, fmtRange, fmtDay, fmtWeekRange, fmtDateSpan, fmtDuration, fmtStamp, tzLabel, browserTz, initials,
+    slotIn,
     toRanges, convertSlots, durationOptions,
     DEFAULT_SETTINGS, normalizeSettings, normalizeWeek, normalizeResponse,
   };
