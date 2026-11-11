@@ -71,7 +71,7 @@
   function fmtDuration(m) {
     m = Math.round(m);
     if (m < 60) return m + ' min';
-    return Math.floor(m / 60) + 'h' + (m % 60 ? ' ' + (m % 60) + 'm' : '');
+    return Math.floor(m / 60) + ' hr' + (m % 60 ? ' ' + (m % 60) + ' min' : '');
   }
   function fmtStamp(iso) {
     const d = new Date(iso);
@@ -121,7 +121,7 @@
     return uniq(out).sort();
   }
   function durationOptions(inc) {
-    return [15, 30, 45, 60, 90, 120].filter((m) => m % inc === 0);
+    return [15, 30, 60].filter((m) => m % inc === 0);
   }
 
   // ───────────── validation (kept identical to apps-script/Code.gs) ─────────────
@@ -129,7 +129,7 @@
     name: '',
     title: 'Weekly meeting',
     timezone: browserTz() || 'America/New_York',
-    increment: 30,
+    increment: 15,
     minMinutes: 90,
     dayStart: '09:00',
     dayEnd: '18:00',
@@ -285,8 +285,8 @@
     const people = [
       ['Alex Rivera', 'Draft of the methods section, and whether the convergence test is enough.', 30],
       ['Bea Novak', 'New results from this week; want feedback on the main figure.', 60],
-      ['Chen Li', 'Stuck on a bug in the fitting code. A quick check-in is fine.', 30],
-      ['Dana Okafor', 'Planning next semester and the conference abstract.', 90],
+      ['Chen Li', 'Stuck on a bug in the fitting code. A quick check-in is fine.', 15],
+      ['Dana Okafor', 'Planning next semester and the conference abstract.', 60],
     ];
     const need = Math.max(1, Math.ceil(w.minMinutes / w.increment));
     const blocks = toRanges(w.slots, w.increment);

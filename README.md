@@ -57,8 +57,9 @@ A student who opens their link again sees their saved answer and can edit it unt
 ## Good to know
 
 - **Time zone**: times are wall-clock times in the time zone set under ⚙︎ Settings. Students see that time zone labeled, plus a note if their computer is set to a different one.
-- **Slot length** is saved per week. It can't be changed once students have responded that week.
-- **Minimum**: the default is 3 slots of 30 min. In 15-minute weeks the default is 6 slots (the same 90 min). Pick a different minimum from the menu if you prefer.
+- **Slot length** is saved per week (default 15 min; a new week starts with whatever you used last). It can't be changed once students have responded that week.
+- **Minimum**: the default is 90 minutes of availability: 6 slots in a 15-minute week, 3 in a 30-minute week. Pick a different minimum from the menu if you prefer.
+- **Time needed**: students choose 15 min, 30 min or 1 hr (in 30-minute weeks: 30 min or 1 hr).
 - **The Sheet** has tabs `Weeks`, `Responses`, `Settings`. `Responses` is a readable backup of everything, but use the admin page to make changes.
 - **Updating the backend code later**: paste the new code, then go to **Deploy → Manage deployments → ✏️ → Version: New version → Deploy**. That keeps the same URL. A *new* deployment would give you a new URL.
 

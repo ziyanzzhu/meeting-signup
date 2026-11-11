@@ -248,7 +248,7 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 function fmtDuration(m) {
   m = Math.round(m);
   if (m < 60) return m + ' min';
-  return Math.floor(m / 60) + 'h' + (m % 60 ? ' ' + (m % 60) + 'm' : '');
+  return Math.floor(m / 60) + ' hr' + (m % 60 ? ' ' + (m % 60) + ' min' : '');
 }
 function toRanges(slots, inc) {
   const out = [];
@@ -265,7 +265,7 @@ const DEFAULT_SETTINGS = {
   name: '',
   title: 'Weekly meeting',
   timezone: Session.getScriptTimeZone() || 'America/New_York',
-  increment: 30,
+  increment: 15,
   minMinutes: 90,
   dayStart: '09:00',
   dayEnd: '18:00',
