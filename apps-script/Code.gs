@@ -11,6 +11,8 @@
  *
  * After editing this code later: Deploy → Manage deployments → ✏️ Edit → Version: New version → Deploy
  * (keeps the same URL).
+ *
+ * @OnlyCurrentDoc  (asks Google for access to this one spreadsheet only)
  */
 
 const ADMIN_KEY = 'CHANGE-ME';
