@@ -163,7 +163,7 @@
     return uniq(out).sort();
   }
   function durationOptions(inc) {
-    return [15, 30, 60].filter((m) => m % inc === 0);
+    return [15, 30, 45, 60].filter((m) => m % inc === 0); // 45 only fits 15-minute weeks
   }
 
   // ───────────── validation (kept identical to apps-script/Code.gs) ─────────────
