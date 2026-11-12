@@ -41,6 +41,12 @@ function doGet() {
 }
 
 /** Run once from the editor: creates the sheets and triggers the permission prompt. */
+// Run once from the editor after adding calendar invitations: Google asks you to allow the new permission.
+function authorize() {
+  Calendar.Events.list('primary', { maxResults: 1 });
+  Logger.log('Calendar access is ready. Next: Deploy → Manage deployments → Edit → New version.');
+}
+
 function setup() {
   Object.keys(COLS).forEach(sheet_);
   if (ADMIN_KEY === 'CHANGE-ME') Logger.log('Sheets are ready. Now change ADMIN_KEY at the top of this file.');
@@ -242,12 +248,15 @@ function hash_(text) { // short, stable cache-key fragment (not for security)
   return h.toString(36);
 }
 function busyFetch_(ids, weekId, tz) {
+  const mine = {}; // events this site created for this week's confirmed meetings
+  const w = loadWeek_(weekId);
+  ((w && w.confirmed && w.confirmed.items) || []).forEach((x) => { if (x.eventId) mine[x.eventId] = true; });
   const timeMin = parseYmd(addDays(weekId, -1)).toISOString();
   const timeMax = parseYmd(addDays(weekId, 8)).toISOString();
   const busy = [], errors = [], busyOnly = [];
   ids.forEach((id) => {
     try {
-      eventsFor_(id, timeMin, timeMax, tz).forEach((ev) => busy.push(ev));
+      eventsFor_(id, timeMin, timeMax, tz, mine).forEach((ev) => busy.push(ev));
     } catch (e) {
       busyOnly.push(id); // no access to details: ask for free/busy instead
     }
@@ -268,7 +277,15 @@ function busyFetch_(ids, weekId, tz) {
   return { ok: true, busy: busy, errors: errors };
 }
 
-function eventsFor_(id, timeMin, timeMax, tz) {
+// A meeting this site booked: tagged on the organizer's copy (private + shared) and on guests' copies
+// (shared), or, as a fallback, one of this week's known event ids (guest copies share the iCalUID).
+function ownMeeting_(ev, mine) {
+  const xp = ev.extendedProperties || {};
+  if ((xp.private && xp.private.meetingSignup) || (xp.shared && xp.shared.meetingSignup)) return true;
+  const uid = String(ev.iCalUID || '').replace(/@google\.com$/, '');
+  return !!(mine && (mine[ev.id] || mine[uid]));
+}
+function eventsFor_(id, timeMin, timeMax, tz, mine) {
   const out = [];
   let pageToken;
   do {
@@ -277,6 +294,7 @@ function eventsFor_(id, timeMin, timeMax, tz) {
     });
     (res.items || []).forEach((ev) => {
       if (ev.status === 'cancelled' || ev.transparency === 'transparent') return; // marked "free"
+      if (ownMeeting_(ev, mine)) return; // a meeting this site booked (it's already on the schedule)
       if (!ev.start || !ev.start.dateTime || !ev.end || !ev.end.dateTime) return;  // all-day events
       const me = (ev.attendees || []).find((a) => a.self);
       if (me && me.responseStatus === 'declined') return;
@@ -357,7 +375,8 @@ function confirm_(req) {
   readResponses_(weekId).forEach((r) => { byId[r.id] = r; });
   const prev = {};
   ((w0.confirmed && w0.confirmed.items) || []).forEach((x) => { prev[x.id] = x; });
-  const items = [], emailed = [], skipped = [];
+  const items = [], emailed = [], invited = [], cancelled = [], skipped = [];
+  const cal = s.invites ? 'primary' : ''; // the script account's own calendar; '' = email only
   (Array.isArray(req.items) ? req.items : []).slice(0, 300).forEach((it) => {
     const rec = confirmItem_(it, byId[String(it && it.id)]);
     if (!rec) { skipped.push({ name: (byId[String(it && it.id)] || {}).name || '', reason: 'response not found or invalid time' }); return; }
@@ -365,15 +384,36 @@ function confirm_(req) {
     const unchanged = old && old.date === rec.date && old.start === rec.start && old.end === rec.end;
     rec.seq = old ? (unchanged ? (old.seq || 0) : (old.seq || 0) + 1) : 0;
     rec.sentAt = unchanged ? (old.sentAt || '') : '';
+    rec.eventId = (old && old.eventId) || '';
+    rec.eventCal = (old && old.eventCal) || '';
+    rec.invitedAt = unchanged && rec.eventCal === cal ? (old.invitedAt || '') : '';
+    if (!EMAIL_RE.test(rec.email)) {
+      if (!rec.sentAt) skipped.push({ name: rec.name, reason: 'no email address' });
+      items.push(rec);
+      return;
+    }
+    if (cal && !rec.invitedAt) { // calendar invitation first, so the email can mention it
+      try { rec.eventId = upsertInvite_(s, cal, weekId, rec); rec.eventCal = cal; rec.invitedAt = new Date().toISOString(); invited.push(rec.name); }
+      catch (e) { skipped.push({ name: rec.name, reason: 'calendar invitation failed: ' + ((e && e.message) || e) }); }
+    }
     if (!rec.sentAt) {
-      if (!EMAIL_RE.test(rec.email)) {
-        skipped.push({ name: rec.name, reason: 'no email address' });
-      } else {
-        try { sendConfirmation_(s, weekId, rec, !!old); rec.sentAt = new Date().toISOString(); emailed.push(rec.name); }
-        catch (e) { skipped.push({ name: rec.name, reason: 'email failed: ' + ((e && e.message) || e) }); }
-      }
+      try { sendConfirmation_(s, weekId, rec, !!old, !!rec.invitedAt); rec.sentAt = new Date().toISOString(); emailed.push(rec.name); }
+      catch (e) { skipped.push({ name: rec.name, reason: 'email failed: ' + ((e && e.message) || e) }); }
     }
     items.push(rec);
+  });
+  // Taken out of the schedule since the last confirm: cancel their calendar invitation.
+  const kept = {};
+  items.forEach((x) => { kept[x.id] = true; });
+  Object.keys(prev).forEach((id) => {
+    const old = prev[id];
+    if (kept[id] || !old.eventId) return;
+    try { Calendar.Events.remove(old.eventCal || cal, old.eventId, { sendUpdates: 'all' }); cancelled.push(old.name); }
+    catch (e) {
+      const msg = String((e && e.message) || e);
+      if (/not found|deleted|404|410/i.test(msg)) cancelled.push(old.name); // already gone
+      else skipped.push({ name: old.name, reason: 'couldn’t cancel the calendar invitation (' + msg + '). Delete it in your calendar.' });
+    }
   });
   const week = withLock_(() => {
     const cur = readWeeks_()[weekId] || w0;
@@ -382,7 +422,35 @@ function confirm_(req) {
     forget_(['week:' + weekId, 'openIds']);
     return cur;
   });
-  return { ok: true, week: week, emailed: emailed, skipped: skipped };
+  return { ok: true, week: week, emailed: emailed, invited: invited, cancelled: cancelled, skipped: skipped };
+}
+
+// Google Calendar event on the script account's calendar with the student (and your other address, e.g.
+// BC) as guests. Google sends the invitations and, when the time changes, the updates.
+function inviteEvent_(s, weekId, rec) {
+  const guests = [{ email: rec.email, displayName: rec.name }];
+  if (s.inviteCopy && s.inviteCopy.toLowerCase() !== rec.email.toLowerCase()) guests.push({ email: s.inviteCopy, responseStatus: 'accepted' });
+  const tag = { meetingSignup: weekId + '-' + rec.id };
+  return {
+    summary: rec.name + ' / ' + (s.name || 'Advisor'),
+    description: (s.title || 'Meeting') + ' · week of ' + niceDate_(weekId),
+    start: { dateTime: rec.startUtc, timeZone: s.timezone },
+    end: { dateTime: rec.endUtc, timeZone: s.timezone },
+    attendees: guests,
+    guestsCanInviteOthers: false,
+    status: 'confirmed',
+    extendedProperties: { private: tag, shared: tag }, // shared: also on the guests' copies, so busy_ can skip them
+  };
+}
+function upsertInvite_(s, cal, weekId, rec) {
+  const ev = inviteEvent_(s, weekId, rec);
+  if (rec.eventId && rec.eventCal === cal) {
+    try { return Calendar.Events.patch(ev, cal, rec.eventId, { sendUpdates: 'all' }).id; }
+    catch (e) { /* deleted by hand: make a new one */ }
+  } else if (rec.eventId && rec.eventCal) {
+    try { Calendar.Events.remove(rec.eventCal, rec.eventId, { sendUpdates: 'all' }); } catch (e) { /* already gone */ }
+  }
+  return Calendar.Events.insert(ev, cal, { sendUpdates: 'all' }).id;
 }
 function confirmItem_(it, r) {
   if (!r || !it) return null;
@@ -391,7 +459,7 @@ function confirmItem_(it, r) {
   if (!DATE_RE.test(date) || !(start >= 0 && end <= 1440 && end > start) || isNaN(a) || isNaN(b) || b <= a) return null;
   return { id: r.id, name: r.name, email: r.email, date: date, start: start, end: end, startUtc: a.toISOString(), endUtc: b.toISOString() };
 }
-function sendConfirmation_(s, weekId, rec, isUpdate) {
+function sendConfirmation_(s, weekId, rec, isUpdate, invited) {
   const host = s.name || 'your advisor';
   const when = niceDay_(rec.date) + ' · ' + range12_(rec.start, rec.end);
   const tzn = Utilities.formatDate(new Date(rec.startUtc), s.timezone, 'zzzz');
@@ -401,16 +469,19 @@ function sendConfirmation_(s, weekId, rec, isUpdate) {
     (isUpdate ? 'Your meeting time has changed. ' : '') + 'Your meeting with ' + host + ' is confirmed:',
     '    ' + when + ' (' + tzn + ')',
     '',
-    'A calendar file is attached so you can add it to your calendar.',
+    invited ? 'You’ll also get a Google Calendar invitation for it.' : 'A calendar file is attached so you can add it to your calendar.',
   ].join('\n');
-  const ics = icsFor_([{ uid: weekId + '-' + rec.id, seq: rec.seq, start: rec.startUtc, end: rec.endUtc, title: rec.name + ' / ' + (s.name || 'Advisor'), desc: '' }]); // "Student / You"
-  MailApp.sendEmail({
+  const mail = {
     to: rec.email,
     subject: (isUpdate ? 'Updated meeting time: ' : 'Meeting confirmed: ') + when,
     body: body,
     name: s.name || 'Meeting sign-up',
-    attachments: [Utilities.newBlob(ics, 'text/calendar', 'meeting.ics')],
-  });
+  };
+  if (!invited) { // the invitation already puts it on their calendar; a second copy would duplicate it
+    const ics = icsFor_([{ uid: weekId + '-' + rec.id, seq: rec.seq, start: rec.startUtc, end: rec.endUtc, title: rec.name + ' / ' + (s.name || 'Advisor'), desc: '' }]); // "Student / You"
+    mail.attachments = [Utilities.newBlob(ics, 'text/calendar', 'meeting.ics')];
+  }
+  MailApp.sendEmail(mail);
 }
 function icsFor_(events) {
   const stamp = icsTime_(new Date().toISOString());
@@ -616,6 +687,8 @@ function normalizeSettings(s) {
     notify: s.notify !== false,
     site: SITE_RE.test(String(s.site || '')) ? String(s.site).slice(0, 300) : '',
     notifyTo: EMAIL_RE.test(String(s.notifyTo || '').trim()) ? String(s.notifyTo).trim().slice(0, 120) : '',
+    invites: s.invites === true,
+    inviteCopy: EMAIL_RE.test(String(s.inviteCopy || '').trim()) ? String(s.inviteCopy).trim().slice(0, 120) : '',
   };
 }
 function normalizeWeek(w) {

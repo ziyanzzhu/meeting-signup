@@ -210,6 +210,8 @@
       notify: s.notify !== false,
       site: SITE_RE.test(String(s.site || '')) ? String(s.site).slice(0, 300) : '',
       notifyTo: EMAIL_RE.test(String(s.notifyTo || '').trim()) ? String(s.notifyTo).trim().slice(0, 120) : '',
+      invites: s.invites === true,
+      inviteCopy: EMAIL_RE.test(String(s.inviteCopy || '').trim()) ? String(s.inviteCopy).trim().slice(0, 120) : '',
     };
   }
   function normalizeWeek(w) {

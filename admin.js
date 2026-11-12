@@ -26,6 +26,7 @@
 
   const coarse = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches); // phones/tablets: tap, don't drag
   let loadSeq = 0; // ignores slow replies for a week you've already navigated away from
+  let viewFor = null; // week whose opening view was picked; after that, refreshes keep the view you chose
   const cacheKey = (id) => 'meet-admin-cache-' + id;
 
   const qs = new URLSearchParams(location.search);
@@ -73,6 +74,8 @@
   function clearAdminCache() {
     try { Object.keys(localStorage).filter((k) => k.indexOf('meet-admin-cache-') === 0).forEach((k) => localStorage.removeItem(k)); } catch (e) { /* ignore */ }
   }
+  // Stay on the view you're on (Availability or Schedule); Schedule needs a schedule to show.
+  function keepView() { if (A.view === 'schedule' && !A.schedule) A.view = 'heat'; }
   // True while the week a request started on is still the one on screen.
   const stillOn = (id, seq) => A.weekId === id && loadSeq === seq;
   const draftKey = (d) => JSON.stringify([d.increment, d.minMinutes, Array.from(d.slots).sort(), d.open, d.note]);
@@ -85,7 +88,8 @@
     A.draft = makeDraft(d.week);
     A.dirty = false; A.focus = null; A.placing = null;
     A.schedule = d.week && d.week.confirmed ? fromConfirmed() : null;
-    A.view = A.schedule ? 'schedule' : 'heat';
+    if (viewFor !== id) { A.view = A.schedule ? 'schedule' : 'heat'; viewFor = id; } // a week opens on its schedule if confirmed
+    keepView();
     syncUrl();
   }
 
@@ -413,13 +417,25 @@
   const utcOf = (d, m) => new Date(M.slotIn(M.slotKey(d, m), A.settings.timezone, A.settings.timezone).t).toISOString();
 
   // Status of one meeting compared with what students were last emailed.
+  const invitesOn = () => !!(A.settings && A.settings.invites);
   function statusOf(it) {
     const c = confirmedItems().find((x) => x.id === it.id);
     if (!c) return 'new';
     if (c.date !== it.date || c.start !== it.start || c.end !== it.end) return 'changed';
-    return c.sentAt ? 'sent' : 'unsent';
+    if (!c.sentAt) return 'unsent';
+    if (invitesOn() && !c.invitedAt) return 'invite'; // emailed before invitations were on
+    return 'sent';
   }
-  const STATUS = { sent: '✓ Emailed', unsent: 'Not emailed (no email address)', changed: 'Moved · will email the new time', new: '' };
+  function statusText(st, it) {
+    const c = confirmedItems().find((x) => x.id === it.id) || {};
+    if (st === 'sent') return c.invitedAt ? '✓ Emailed and invited' : '✓ Emailed';
+    if (st === 'unsent') return 'Not emailed (no email address)';
+    if (st === 'changed') return invitesOn() ? 'Moved · will email and update the invitation' : 'Moved · will email the new time';
+    if (st === 'invite') return 'Will send a calendar invitation';
+    return '';
+  }
+  // Confirmed meetings with a calendar invitation that are no longer on the schedule: cancelled on confirm.
+  const toCancel = () => confirmedItems().filter((c) => c.eventId && !(A.schedule && A.schedule.items.some((it) => it.id === c.id)));
 
   function clashNote(it) {
     const evs = eventsDuring(it.date, it.start, it.end);
@@ -428,8 +444,9 @@
   function scheduleSec() {
     const sc = A.schedule;
     const st = sc.items.map(statusOf);
-    const toSend = st.filter((x) => x === 'new' || x === 'changed').length;
-    const isConfirmed = confirmedItems().length && !toSend;
+    const toSend = st.filter((x) => x === 'new' || x === 'changed' || x === 'invite').length;
+    const cancels = toCancel();
+    const isConfirmed = confirmedItems().length && !toSend && !cancels.length;
     return '<div class="side-sec">' +
       '<div class="sec-head"><h3>' + (isConfirmed ? 'Confirmed schedule' : 'Schedule') + '</h3>' +
         '<span class="sec-actions"><button class="btn sm ghost icon" data-act="copy-schedule" title="Copy as text" aria-label="Copy as text">' + icon('copy') + '</button>' +
@@ -443,17 +460,21 @@
             '<span>' + esc(M.fmtDay(it.date)) + ' · ' + esc(M.fmtRange(it.start, it.end)) + '</span>' +
             (it.outside ? '<span class="warn-t">Outside the times they picked</span>' : '') +
             clashNote(it) +
-            (STATUS[st[i]] ? '<span class="st st-' + st[i] + '">' + STATUS[st[i]] + '</span>' : '') +
+            (statusText(st[i], it) ? '<span class="st st-' + st[i] + '">' + statusText(st[i], it) + '</span>' : '') +
             '</div><button class="btn ghost icon x" data-act="unschedule" data-id="' + esc(it.id) + '" title="Take out of the schedule" aria-label="Take ' + esc(it.name) + ' out of the schedule">' + icon('x') + '</button></li>').join('') + '</ol>'
         : '<p class="muted small">No one is scheduled.</p>') +
       (sc.unfit.length
         ? '<div class="unfit"><b>Not scheduled</b><ul>' + sc.unfit.map((u) =>
             '<li>' + esc(u.name) + ' <span>(' + esc(u.reason) + ')</span> <button class="linkbtn" data-act="place" data-id="' + esc(u.id) + '">Place</button></li>').join('') + '</ul></div>'
         : '') +
+      (cancels.length ? '<p class="small" style="margin-top:10px;color:var(--warn)">Taken out: ' + cancels.map((c) => esc(c.name)).join(', ') + '. Their calendar invitation' + (cancels.length === 1 ? ' is' : 's are') + ' cancelled when you confirm.</p>' : '') +
       (sc.partial ? '<p class="muted small" style="margin-top:10px">Big group: this is the best arrangement found quickly, and a better one may exist.</p>' : '') +
-      '<button class="btn primary block" data-act="confirm" style="margin-top:14px"' + (toSend ? '' : ' disabled') + '>' +
-        (toSend ? icon('check') + 'Confirm & email ' + toSend + ' student' + (toSend === 1 ? '' : 's') : 'Everyone has been emailed') + '</button>' +
-      '<p class="muted small" style="margin-top:8px">Each student gets their time by email with a calendar file. If you move someone later, only they get an update.</p>' +
+      '<button class="btn primary block" data-act="confirm" style="margin-top:14px"' + (toSend || cancels.length ? '' : ' disabled') + '>' +
+        (toSend ? icon('check') + 'Confirm & email ' + toSend + ' student' + (toSend === 1 ? '' : 's')
+          : cancels.length ? icon('check') + 'Cancel ' + cancels.length + ' invitation' + (cancels.length === 1 ? '' : 's') : 'Everyone has been emailed') + '</button>' +
+      '<p class="muted small" style="margin-top:8px">' + (invitesOn()
+        ? 'Each student gets an email and a Google Calendar invitation' + (A.settings.inviteCopy ? ' (' + esc(A.settings.inviteCopy) + ' is invited too)' : '') + '. If you move someone later, only they get an update.'
+        : 'Each student gets their time by email with a calendar file. If you move someone later, only they get an update.') + '</p>' +
     '</div>';
   }
 
@@ -673,10 +694,17 @@
   async function confirmSchedule() {
     const sc = A.schedule;
     if (!sc || !sc.items.length) return;
-    const toSend = sc.items.filter((it) => ['new', 'changed'].includes(statusOf(it)));
-    if (!toSend.length) { M.toast('Everyone already has their current time.'); return; }
-    const lines = toSend.map((it) => '• ' + it.name + ': ' + M.fmtDay(it.date) + ', ' + M.fmtRange(it.start, it.end) + (statusOf(it) === 'changed' ? ' (moved)' : ''));
-    if (!confirm('Email ' + toSend.length + ' student' + (toSend.length === 1 ? '' : 's') + ' their meeting time?\n\n' + lines.join('\n') +
+    const toSend = sc.items.filter((it) => ['new', 'changed', 'invite'].includes(statusOf(it)));
+    const cancels = toCancel();
+    if (!toSend.length && !cancels.length) { M.toast('Everyone already has their current time.'); return; }
+    const tag = { changed: ' (moved)', invite: ' (invitation only, already emailed)' };
+    const lines = toSend.map((it) => '• ' + it.name + ': ' + M.fmtDay(it.date) + ', ' + M.fmtRange(it.start, it.end) + (tag[statusOf(it)] || ''));
+    const n = toSend.length, who = n + ' student' + (n === 1 ? '' : 's');
+    const head = !n ? 'Cancel these calendar invitations?'
+      : invitesOn() ? 'Email ' + who + ' their meeting time and send Google Calendar invitations?'
+      : 'Email ' + who + ' their meeting time?';
+    if (!confirm(head + (n ? '\n\n' + lines.join('\n') : '') +
+      (cancels.length ? '\n\nCancel calendar invitation: ' + cancels.map((c) => c.name).join(', ') : '') +
       (sc.unfit.length ? '\n\nNot scheduled, no email: ' + sc.unfit.map((u) => u.name).join(', ') : ''))) return;
     const id = A.weekId, seq = loadSeq;
     const items = sc.items.map((it) => ({ id: it.id, date: it.date, start: it.start, end: it.end, startUtc: utcOf(it.date, it.start), endUtc: utcOf(it.date, it.end) }));
@@ -689,8 +717,10 @@
       A.schedule = fromConfirmed();
       A.view = 'schedule';
       render();
-      M.toast(M.DEMO ? 'Demo: confirmed (no emails in demo mode)' : 'Emailed ' + res.emailed.length + ' student' + (res.emailed.length === 1 ? '' : 's'));
-      if (res.skipped && res.skipped.length) alert('Not emailed:\n' + res.skipped.map((x) => '• ' + (x.name || '?') + ': ' + x.reason).join('\n'));
+      const count = (list, one, many) => list && list.length ? list.length + ' ' + (list.length === 1 ? one : many) : '';
+      const done = [count(res.emailed, 'email', 'emails'), count(res.invited, 'invitation', 'invitations'), count(res.cancelled, 'cancellation', 'cancellations')].filter(Boolean);
+      M.toast(M.DEMO ? 'Demo: confirmed (no emails in demo mode)' : done.length ? 'Sent ' + done.join(' · ') : 'Saved');
+      if (res.skipped && res.skipped.length) alert('Needs a look:\n' + res.skipped.map((x) => '• ' + (x.name || '?') + ': ' + x.reason).join('\n'));
     } catch (e) {
       setBusy(false);
       M.toast(e.message);
@@ -736,7 +766,7 @@
       if (!A.dirty) { A.week = d.week; A.draft = makeDraft(d.week); }
       A.focus = null; A.placing = null;
       A.schedule = A.week && A.week.confirmed ? fromConfirmed() : null;
-      A.view = A.schedule ? 'schedule' : 'heat';
+      keepView();
       cacheNow();
       render();
       M.toast(msg || 'Up to date');
@@ -755,8 +785,11 @@
       if (!stillOn(week, seq)) { M.store.del(cacheKey(week)); return; }
       A.responses = A.responses.filter((x) => x.id !== id);
       if (A.focus === id) A.focus = null;
-      A.schedule = A.week && A.week.confirmed ? fromConfirmed() : null;
-      A.view = A.schedule ? 'schedule' : 'heat';
+      if (A.schedule) { // take just them out; the rest of your schedule (and any unsent moves) stays
+        const items = A.schedule.items.filter((it) => it.id !== id), unfit = A.schedule.unfit.filter((u) => u.id !== id);
+        A.schedule = items.length || unfit.length ? finalizeSchedule(items, unfit, A.schedule.partial) : null;
+      }
+      keepView();
       cacheNow();
       render();
       M.toast('Response deleted');
@@ -1076,7 +1109,12 @@
             '<label class="check"><input type="checkbox" name="notify"' + (s.notify ? ' checked' : '') + '> Email me when a student responds</label>' +
             '<div class="field"><label for="s-notify">Send these alerts to</label>' +
               '<input class="input" id="s-notify" name="notifyTo" type="email" maxlength="120" value="' + esc(s.notifyTo || '') + '" placeholder="The Google account that owns the script">' +
-              '<span class="help">Leave empty to use the Google account that owns the script.</span></div>') +
+              '<span class="help">Leave empty to use the Google account that owns the script.</span></div>' +
+            ('invites' in s ? // only once the backend supports invitations
+            '<label class="check"><input type="checkbox" name="invites"' + (s.invites ? ' checked' : '') + '> Also send Google Calendar invitations when I confirm</label>' +
+            '<div class="field"><label for="s-invite">Also invite</label>' +
+              '<input class="input" id="s-invite" name="inviteCopy" type="email" maxlength="120" value="' + esc(s.inviteCopy || '') + '" placeholder="e.g. your BC email">' +
+              '<span class="help">Invitations come from the Google account that owns the script, and each meeting goes on its calendar. Add another address, like your BC email, to put the meetings on that calendar too.</span></div>' : '')) +
         '</div>' +
         '<div class="dlg-foot">' +
           (M.DEMO
@@ -1107,7 +1145,7 @@
         dayStart: f.namedItem('dayStart').value,
         dayEnd: f.namedItem('dayEnd').value,
         weekends: f.namedItem('weekends').checked,
-        ...(M.DEMO ? {} : { calendars: f.namedItem('calendars').value, notify: f.namedItem('notify').checked, notifyTo: f.namedItem('notifyTo').value }),
+        ...(M.DEMO ? {} : { calendars: f.namedItem('calendars').value, notify: f.namedItem('notify').checked, notifyTo: f.namedItem('notifyTo').value, ...(f.namedItem('invites') ? { invites: f.namedItem('invites').checked, inviteCopy: f.namedItem('inviteCopy').value } : {}) }),
       };
       if (M.toMin(next.dayEnd) <= M.toMin(next.dayStart)) { M.toast('The calendar has to end after it starts.'); return; }
       if (next.timezone !== s.timezone && !confirm('Change your time zone to ' + M.tzLabel(next.timezone) + '? Weeks you’ve already published keep their clock times, so students will see them shifted by the time difference.')) return;

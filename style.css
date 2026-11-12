@@ -476,7 +476,7 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
 .sched li .x:hover { opacity: 1; }
 .sched .st { font-size: 11.5px; font-weight: 600; }
 .sched .st-sent { color: var(--ok); }
-.sched .st-changed, .sched .st-unsent, .sched .warn-t { color: var(--warn); }
+.sched .st-changed, .sched .st-unsent, .sched .st-invite, .sched .warn-t { color: var(--warn); }
 .sched .warn-t { font-size: 11.5px; }
 .unfit ul { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .unfit li span { opacity: 0.8; }
