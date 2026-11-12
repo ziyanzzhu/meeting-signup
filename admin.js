@@ -234,7 +234,7 @@
   function minHint() {
     const d = A.draft;
     const n = Math.max(1, Math.ceil(d.minMinutes / d.increment));
-    return 'Students see: “Choose at least ' + n + ' slot' + (n === 1 ? '' : 's') + ' and as many as possible.”';
+    return 'Students see: “Choose at least ' + n + ' slot' + (n === 1 ? '' : 's') + '.”';
   }
 
   function availView() {

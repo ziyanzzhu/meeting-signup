@@ -228,7 +228,7 @@
     });
     const days = Array.from(byDay.keys()).sort();
     const need = needSlots();
-    const intro = 'Choose at least <b>' + need + ' slot' + (need === 1 ? '' : 's') + '</b> and as many as possible. ' +
+    const intro = 'Choose at least <b>' + need + ' slot' + (need === 1 ? '' : 's') + '</b>. ' +
       (touchScreen ? 'Tap the times that work for you, or tap a day to select all of it.' : 'Click and drag to select several at once.');
 
     if (!days.length) {

@@ -3,7 +3,7 @@
 A small sign-up site for weekly student meetings.
 
 - **You** (`admin.html`): drag on a week grid to mark when you're free, then publish to get that week's link. You can use 15- or 30-minute slots.
-- **Students** (`index.html?week=…`): choose at least 3 slots and as many as possible. Then they say what they want to talk about and how much time they think they need.
+- **Students** (`index.html?week=…`): choose at least 3 slots. Then they say what they want to talk about and how much time they think they need.
 - **Responses**: a heatmap of who's free when, each student's notes, and a **Suggest schedule** button. It fits everyone's requested time into your free slots with no overlaps.
 
 Students only ever see the website. Responses are stored in a Google Sheet behind the scenes, and only you can read them.

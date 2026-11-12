@@ -249,7 +249,7 @@
     const slots = uniq((Array.isArray(r.slots) ? r.slots : []).map(String)).filter((k) => offered.has(k)).sort();
     const need = Math.max(1, Math.min(week.slots.length, Math.ceil(week.minMinutes / week.increment)));
     if (slots.length < need) {
-      throw new Error('Please choose at least ' + need + ' slot' + (need === 1 ? '' : 's') + ', and as many as possible.');
+      throw new Error('Please choose at least ' + need + ' slot' + (need === 1 ? '' : 's') + '.');
     }
     return {
       id: String(r.id || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) || newId(),
