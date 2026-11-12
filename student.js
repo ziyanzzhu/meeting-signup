@@ -42,12 +42,13 @@
         history.replaceState(null, '', '?week=' + weekParam);
       }
       if (!M.DEMO) M.store.set(CACHE_KEY, d);
-      if (cached && JSON.stringify(cached) === JSON.stringify(d)) return;
+      if (cached && JSON.stringify(cached) === JSON.stringify(d)) { syncSaved(); return; }
       const before = S.step + '|' + (S.week && S.week.id);
       const rerouted = apply(d);
       const after = S.step + '|' + (S.week && S.week.id);
       // Don't redraw under a student who is typing, unless the week itself changed.
       if (!cached || rerouted || before !== after || S.step !== 'details') render();
+      syncSaved();
     } catch (e) {
       if (cached) return; // keep showing the saved copy
       S.step = 'error';
@@ -87,6 +88,27 @@
       if (M.browserTz()) new Intl.DateTimeFormat('en-US', { timeZone: M.browserTz() });
       return true;
     } catch (e) { return false; }
+  }
+
+  // The response remembered in this browser may have been edited on another device or deleted
+  // by the professor: check with the server and follow it.
+  function syncSaved() {
+    if (!S.saved || !S.week || S.step === 'details') return;
+    const weekId = S.week.id, id = S.saved.id;
+    M.api.getMine(weekId, id).then((res) => {
+      if (!S.saved || S.saved.id !== id || S.step === 'details') return;
+      if (JSON.stringify(res.response) === JSON.stringify(S.saved)) return;
+      S.saved = res.response;
+      M.store.set('meet-resp-' + weekId, res.response);
+      loadSaved();
+      render();
+    }).catch((e) => {
+      if (!/isn’t valid/.test(e.message) || !S.saved || S.saved.id !== id) return;
+      M.store.del('meet-resp-' + weekId);
+      S.saved = null; S.sel = new Set(); S.justSubmitted = false;
+      S.form.topic = ''; S.form.duration = null;
+      if (S.step === 'done') { S.step = 'select'; render(); }
+    });
   }
 
   function computeView() {
