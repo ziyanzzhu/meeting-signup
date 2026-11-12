@@ -63,7 +63,7 @@ Use a **personal Gmail account**. University-managed Google accounts often block
 5. Watch the **Responses** tab. Click a student to see only their times. Click **Suggest schedule** for a non-overlapping plan, then **Copy** it to email out. Students aren't notified automatically.
 6. Turn off **Accepting responses** to close sign-ups.
 
-A student who opens their link again sees their saved answer and can edit it until sign-ups close. A second submission under the same name replaces the first.
+A student who opens their link again sees their saved answer and can edit it until sign-ups close. Edits from the same browser update that response. A submission from another device, or under a different name, is saved as a separate response, so nobody can overwrite someone else's answer. If a student ends up with two, delete the older one in the Responses tab.
 
 ## Good to know
 

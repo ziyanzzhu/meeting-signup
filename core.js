@@ -290,8 +290,8 @@
           const w = db.weeks[String(req.weekId || '')];
           const r = normalizeResponse(w, req.response);
           const list = db.responses[w.id] = db.responses[w.id] || [];
-          let i = list.findIndex((x) => x.id === r.id);
-          if (i < 0) i = list.findIndex((x) => norm(x.name) === norm(r.name));
+          const i = list.findIndex((x) => x.id === r.id && norm(x.name) === norm(r.name));
+          if (i < 0 && list.some((x) => x.id === r.id)) r.id = newId();
           r.submitted = i >= 0 ? list[i].submitted : now;
           r.updated = now;
           if (i >= 0) list[i] = r; else list.push(r);

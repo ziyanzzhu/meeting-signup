@@ -112,11 +112,10 @@ function submit_(req) {
   const rows = readTable_('Responses');
   const sameWeek = (x) => str_(x[0]) === w.id;
   const sameName = (x) => norm(str_(x[1])) === norm(r.name);
-  // Same browser + same name → update. Same name from another device → update, unless the
-  // saved response has a different email. A different name from the same browser (shared
-  // computer) → a new response, never overwriting someone else's.
+  // Only an edit from the same browser under the same name updates a response. Anything else
+  // (another device, a different name on a shared computer) is saved as a new response, so no
+  // one can ever replace someone else's answer.
   let idx = rows.findIndex((x) => sameWeek(x) && str_(x[8]) === r.id && sameName(x));
-  if (idx < 0) idx = rows.findIndex((x) => sameWeek(x) && sameName(x) && (!str_(x[2]) || norm(str_(x[2])) === norm(r.email)));
   if (idx < 0 && rows.some((x) => sameWeek(x) && str_(x[8]) === r.id)) r.id = newId();
   if (idx < 0 && rows.filter(sameWeek).length >= 300) throw new Error('This week already has too many responses.');
   if (idx >= 0) r.id = str_(rows[idx][8]) || r.id;
