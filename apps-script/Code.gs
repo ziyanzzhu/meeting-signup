@@ -54,13 +54,16 @@ function route_(req) {
       rateLimit_('submit', 60);
       const res = withLock_(() => submit_(req));
       notify_(res.week, res.response, res.isUpdate);
+      receipt_(res.week, res.response, res.isUpdate);
       return { ok: true, response: res.response };
     }
+    case 'getMine': rateLimit_('mine', 120); return getMine_(req);
     case 'adminLoad': auth_(req); return adminLoad_(req);
     case 'saveWeek': auth_(req); return withLock_(() => saveWeek_(req));
     case 'saveSettings': auth_(req); return withLock_(() => saveSettings_(req));
     case 'deleteResponse': auth_(req); return withLock_(() => deleteResponse_(req));
     case 'busy': auth_(req); return busy_(req);
+    case 'confirm': auth_(req); return confirm_(req);
     default: throw new Error('Unknown action.');
   }
 }
@@ -135,12 +138,28 @@ function submit_(req) {
 
 function adminLoad_(req) {
   const id = String(req.weekId || '');
+  if (SITE_RE.test(String(req.site || '')) && loadSettings_().site !== req.site) {
+    withLock_(() => { const s = readSettings_(); s.site = req.site; writeSettings_(normalizeSettings(s)); forget_(['settings']); });
+  }
   return { ok: true, settings: loadSettings_(), week: DATE_RE.test(id) ? loadWeek_(id) : null, responses: responsesFor_(id) };
 }
 
 function saveWeek_(req) {
   const w = normalizeWeek(req.week);
+  const old = readWeeks_()[w.id];
+  if (old && old.confirmed) w.confirmed = old.confirmed; // editing slots never drops a confirmed schedule
   w.updated = new Date().toISOString();
+  writeWeekRow_(w);
+  const s = readSettings_();
+  s.increment = w.increment;
+  s.minMinutes = w.minMinutes;
+  if (SITE_RE.test(String(req.site || ''))) s.site = req.site;
+  writeSettings_(normalizeSettings(s));
+  forget_(['week:' + w.id, 'openIds', 'settings']);
+  return { ok: true, week: w };
+}
+
+function writeWeekRow_(w) {
   const sh = sheet_('Weeks');
   const idx = readTable_('Weeks').findIndex((x) => str_(x[0]) === w.id);
   const row = [
@@ -149,13 +168,15 @@ function saveWeek_(req) {
   ];
   if (idx >= 0) sh.getRange(idx + 2, 1, 1, row.length).setValues([row]);
   else sh.getRange(sh.getLastRow() + 1, 1, 1, row.length).setValues([row]);
-  const s = readSettings_();
-  s.increment = w.increment;
-  s.minMinutes = w.minMinutes;
-  if (SITE_RE.test(String(req.site || ''))) s.site = req.site;
-  writeSettings_(normalizeSettings(s));
-  forget_(['week:' + w.id, 'openIds', 'settings']);
-  return { ok: true, week: w };
+}
+
+// A student's own response, for the private edit link in their receipt email.
+function getMine_(req) {
+  const weekId = String(req.weekId || ''), id = String(req.id || '');
+  if (!DATE_RE.test(weekId) || !id) throw new Error('This edit link isn’t valid.');
+  const r = responsesFor_(weekId).find((x) => x.id === id);
+  if (!r) throw new Error('This edit link isn’t valid anymore. You can send a new response.');
+  return { ok: true, response: r };
 }
 
 function saveSettings_(req) {
@@ -256,8 +277,8 @@ function notify_(w, r, isUpdate) {
   try {
     const s = loadSettings_();
     if (!s.notify) return;
-    const to = Session.getEffectiveUser().getEmail();
-    if (!to) return;
+    const to = s.notifyTo || Session.getEffectiveUser().getEmail();
+    if (!to) { Logger.log('Alert not sent: no recipient'); return; }
     const week = niceDate_(w.id);
     const link = s.site ? s.site.replace(/\/?$/, '/') + 'admin.html?week=' + w.id + '&tab=responses' : '';
     const lines = [r.name + (isUpdate ? ' updated their' : ' sent a') + ' meeting request for the week of ' + week + '.'];
@@ -277,6 +298,122 @@ function notify_(w, r, isUpdate) {
     Logger.log('Email not sent: ' + ((e && e.message) || e));
   }
 }
+// Receipt to the student: their times plus a private link to revise them (no free text from the form).
+function receipt_(w, r, isUpdate) {
+  try {
+    if (!EMAIL_RE.test(r.email || '')) return;
+    const s = loadSettings_();
+    const host = s.name || 'your advisor';
+    const link = s.site ? s.site.replace(/\/?$/, '/') + '?week=' + w.id + '&r=' + encodeURIComponent(r.id) : '';
+    const tzn = Utilities.formatDate(new Date(), s.timezone, 'zzzz');
+    const lines = [
+      'Hi ' + r.name.split(/\s+/)[0] + ',',
+      '',
+      (isUpdate ? 'Your updated availability' : 'Your availability') + ' for the week of ' + niceDate_(w.id) + ' was received' +
+        (s.name ? ' by ' + s.name : '') + ':',
+    ];
+    toRanges(r.slots, w.increment).forEach((x) => lines.push('    ' + niceDay_(x.date) + ' · ' + range12_(x.start, x.end)));
+    lines.push('(' + tzn + ')', '', 'Time needed: ' + fmtDuration(r.duration));
+    if (link) lines.push('', 'Need to change something? Use your private link:', link);
+    lines.push('', 'You’ll get another email once your meeting time is confirmed.');
+    MailApp.sendEmail({
+      to: r.email,
+      subject: (isUpdate ? 'Updated: ' : '') + 'Your meeting times for the week of ' + niceDate_(w.id),
+      body: lines.join('\n'),
+      name: s.name || 'Meeting sign-up',
+    });
+  } catch (e) {
+    Logger.log('Receipt not sent: ' + ((e && e.message) || e));
+  }
+}
+
+// ───────────── confirm meetings: email each student their time with a calendar file ─────────────
+function confirm_(req) {
+  const weekId = String(req.weekId || '');
+  if (!DATE_RE.test(weekId)) throw new Error('Invalid week.');
+  const w0 = readWeeks_()[weekId];
+  if (!w0) throw new Error('Publish this week first.');
+  const s = readSettings_();
+  const byId = {};
+  readResponses_(weekId).forEach((r) => { byId[r.id] = r; });
+  const prev = {};
+  ((w0.confirmed && w0.confirmed.items) || []).forEach((x) => { prev[x.id] = x; });
+  const items = [], emailed = [], skipped = [];
+  (Array.isArray(req.items) ? req.items : []).slice(0, 300).forEach((it) => {
+    const rec = confirmItem_(it, byId[String(it && it.id)]);
+    if (!rec) { skipped.push({ name: (byId[String(it && it.id)] || {}).name || '', reason: 'response not found or invalid time' }); return; }
+    const old = prev[rec.id];
+    const unchanged = old && old.date === rec.date && old.start === rec.start && old.end === rec.end;
+    rec.seq = old ? (unchanged ? (old.seq || 0) : (old.seq || 0) + 1) : 0;
+    rec.sentAt = unchanged ? (old.sentAt || '') : '';
+    if (!rec.sentAt) {
+      if (!EMAIL_RE.test(rec.email)) {
+        skipped.push({ name: rec.name, reason: 'no email address' });
+      } else {
+        try { sendConfirmation_(s, weekId, rec, !!old); rec.sentAt = new Date().toISOString(); emailed.push(rec.name); }
+        catch (e) { skipped.push({ name: rec.name, reason: 'email failed: ' + ((e && e.message) || e) }); }
+      }
+    }
+    items.push(rec);
+  });
+  const week = withLock_(() => {
+    const cur = readWeeks_()[weekId] || w0;
+    cur.confirmed = { at: new Date().toISOString(), items: items };
+    writeWeekRow_(cur);
+    forget_(['week:' + weekId, 'openIds']);
+    return cur;
+  });
+  return { ok: true, week: week, emailed: emailed, skipped: skipped };
+}
+function confirmItem_(it, r) {
+  if (!r || !it) return null;
+  const date = String(it.date || ''), start = Number(it.start), end = Number(it.end);
+  const a = new Date(String(it.startUtc || '')), b = new Date(String(it.endUtc || ''));
+  if (!DATE_RE.test(date) || !(start >= 0 && end <= 1440 && end > start) || isNaN(a) || isNaN(b) || b <= a) return null;
+  return { id: r.id, name: r.name, email: r.email, date: date, start: start, end: end, startUtc: a.toISOString(), endUtc: b.toISOString() };
+}
+function sendConfirmation_(s, weekId, rec, isUpdate) {
+  const host = s.name || 'your advisor';
+  const when = niceDay_(rec.date) + ' · ' + range12_(rec.start, rec.end);
+  const tzn = Utilities.formatDate(new Date(rec.startUtc), s.timezone, 'zzzz');
+  const body = [
+    'Hi ' + rec.name.split(/\s+/)[0] + ',',
+    '',
+    (isUpdate ? 'Your meeting time has changed. ' : '') + 'Your meeting with ' + host + ' is confirmed:',
+    '    ' + when + ' (' + tzn + ')',
+    '',
+    'A calendar file is attached so you can add it to your calendar.',
+  ].join('\n');
+  const ics = icsFor_([{ uid: weekId + '-' + rec.id, seq: rec.seq, start: rec.startUtc, end: rec.endUtc, title: 'Meeting with ' + host, desc: '' }]);
+  MailApp.sendEmail({
+    to: rec.email,
+    subject: (isUpdate ? 'Updated meeting time: ' : 'Meeting confirmed: ') + when,
+    body: body,
+    name: s.name || 'Meeting sign-up',
+    attachments: [Utilities.newBlob(ics, 'text/calendar', 'meeting.ics')],
+  });
+}
+function icsFor_(events) {
+  const stamp = icsTime_(new Date().toISOString());
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//meeting-signup//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH'];
+  events.forEach((e) => lines.push('BEGIN:VEVENT', 'UID:' + e.uid + '@meeting-signup', 'SEQUENCE:' + (e.seq || 0), 'DTSTAMP:' + stamp,
+    'DTSTART:' + icsTime_(e.start), 'DTEND:' + icsTime_(e.end), 'SUMMARY:' + icsText_(e.title), 'DESCRIPTION:' + icsText_(e.desc || ''), 'END:VEVENT'));
+  lines.push('END:VCALENDAR');
+  return lines.map(icsFold_).join('\r\n') + '\r\n';
+}
+function icsTime_(iso) { return String(iso).replace(/\.\d{3}Z$/, 'Z').replace(/[-:]/g, ''); }
+function icsText_(t) { return String(t).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n'); }
+function icsFold_(line) {
+  const out = [];
+  while (line.length > 74) { out.push(line.slice(0, 74)); line = ' ' + line.slice(74); }
+  out.push(line);
+  return out.join('\r\n');
+}
+const ampm_ = (m) => (Math.floor(m / 60) % 24 < 12 ? 'am' : 'pm');
+const clock_ = (m) => (Math.floor(m / 60) % 12 || 12) + ':' + pad(m % 60);
+function range12_(a, b) { return ampm_(a) === ampm_(b) ? clock_(a) + ' – ' + clock_(b) + ampm_(b) : clock_(a) + ampm_(a) + ' – ' + clock_(b) + ampm_(b); }
+function niceDay_(ymd) { return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][parseYmd(ymd).getUTCDay()] + ', ' + niceDate_(ymd); }
+
 function niceDate_(ymd) {
   const M = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const d = parseYmd(ymd);
@@ -398,6 +535,7 @@ const toMin = (hm) => { const p = hm.split(':').map(Number); return p[0] * 60 + 
 const fromMin = (m) => pad(Math.floor(m / 60)) + ':' + pad(m % 60);
 const splitKey = (k) => [k.slice(0, 10), toMin(k.slice(11, 16))];
 const SLOT_RE = /^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d$/;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const SITE_RE = /^https:\/\/[\w.-]+(\/[\w.~%\/-]*)?$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 function fmtDuration(m) {
@@ -428,6 +566,7 @@ const DEFAULT_SETTINGS = {
   calendars: 'primary',
   notify: true,
   site: '',
+  notifyTo: '',
 };
 function validTz(tz) {
   if (typeof tz !== 'string' || !/^[A-Za-z_]+(\/[A-Za-z0-9_+\-]+)*$/.test(tz)) return false;
@@ -457,6 +596,7 @@ function normalizeSettings(s) {
     calendars: clip(s.calendars == null ? DEFAULT_SETTINGS.calendars : s.calendars, 500).trim(),
     notify: s.notify !== false,
     site: SITE_RE.test(String(s.site || '')) ? String(s.site).slice(0, 300) : '',
+    notifyTo: EMAIL_RE.test(String(s.notifyTo || '').trim()) ? String(s.notifyTo).trim().slice(0, 120) : '',
   };
 }
 function normalizeWeek(w) {
@@ -485,6 +625,8 @@ function normalizeResponse(week, r) {
   if (!name) throw new Error('Please enter your name.');
   const topic = clip(r.topic, 4000).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim();
   if (!topic) throw new Error('Please say what you would like to talk about.');
+  const email = clip(r.email, 120).replace(/[\s\u0000-\u001f\u007f]/g, '');
+  if (!EMAIL_RE.test(email)) throw new Error('Please enter your email so you can get your meeting time.');
   const duration = Number(r.duration);
   if (!(duration >= 5 && duration <= 480)) throw new Error('Please choose how much time you need.');
   if (Array.isArray(r.slots) && r.slots.length > 2000) throw new Error('Too many times selected.');
@@ -497,7 +639,7 @@ function normalizeResponse(week, r) {
   return {
     id: String(r.id || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) || newId(),
     name: name,
-    email: clip(r.email, 120).replace(/[\s\u0000-\u001f\u007f]/g, ''),
+    email: email,
     topic: topic,
     duration: Math.round(duration),
     slots: slots,

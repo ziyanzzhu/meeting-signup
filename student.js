@@ -8,6 +8,7 @@
   const rawWeek = qs.get('week');
   const weekParam = rawWeek && /^\d{4}-\d{2}-\d{2}$/.test(rawWeek) ? M.mondayOf(rawWeek) : (rawWeek || null);
   const CACHE_KEY = 'meet-cache-' + (weekParam || 'current');
+  const editId = qs.get('r'); // private edit link from the receipt email
   const touchScreen = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
 
   const S = {
@@ -27,11 +28,19 @@
 
   // Show the last copy of this week instantly (if any), then refresh from the server.
   async function start() {
-    const cached = M.DEMO ? null : M.store.get(CACHE_KEY);
+    const cached = M.DEMO || editId ? null : M.store.get(CACHE_KEY);
     if (cached) apply(cached);
     render();
     try {
+      const mine = editId && weekParam ? M.api.getMine(weekParam, editId).catch((e) => ({ error: e.message })) : null;
       const d = await M.api.getWeek(weekParam);
+      if (mine) {
+        // Opening the edit link loads that response on this device, then tidies the address bar.
+        const m = await mine;
+        if (m.response && d.week) M.store.set('meet-resp-' + d.week.id, m.response);
+        else if (m.error) setTimeout(() => M.toast(m.error), 300);
+        history.replaceState(null, '', '?week=' + weekParam);
+      }
       if (!M.DEMO) M.store.set(CACHE_KEY, d);
       if (cached && JSON.stringify(cached) === JSON.stringify(d)) return;
       const before = S.step + '|' + (S.week && S.week.id);
@@ -272,8 +281,9 @@
       '<form class="form" id="details" novalidate>' +
         '<div class="field"><label for="f-name">Your name</label>' +
           '<input class="input" id="f-name" name="name" autocomplete="name" maxlength="80" value="' + esc(f.name) + '"></div>' +
-        '<div class="field"><label for="f-email">Email <span class="opt">optional</span></label>' +
-          '<input class="input" id="f-email" name="email" type="email" autocomplete="email" maxlength="120" value="' + esc(f.email) + '"></div>' +
+        '<div class="field"><label for="f-email">Email</label>' +
+          '<input class="input" id="f-email" name="email" type="email" autocomplete="email" maxlength="120" value="' + esc(f.email) + '">' +
+          '<span class="help">You’ll get a confirmation with a link to change your times, and later your meeting time.</span></div>' +
         '<div class="field"><label for="f-topic">What would you like to talk about this week?</label>' +
           '<textarea class="input" id="f-topic" name="topic" rows="5" maxlength="4000" placeholder="Progress since last time, results to look at, questions, anything you’re stuck on…">' + esc(f.topic) + '</textarea></div>' +
         '<div class="field"><span class="label" id="dur-l">How much time do you think you need?</span>' +
@@ -309,7 +319,8 @@
     if (!f.name.trim()) return fail('Please enter your name.', 'f-name');
     if (!f.topic.trim()) return fail('Please say what you would like to talk about.', 'f-topic');
     if (!f.duration || !M.durationOptions(inc()).includes(f.duration)) return fail('Please choose how much time you think you need.', 'f-dur');
-    if (f.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.email.trim())) return fail('That email address doesn’t look right.', 'f-email');
+    if (!f.email.trim()) return fail('Please enter your email so you can get your meeting time.', 'f-email');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.email.trim())) return fail('That email address doesn’t look right.', 'f-email');
     S.busy = true; S.formError = ''; render();
     try {
       let id = (S.saved && S.saved.id) || M.store.get('meet-id');
@@ -351,7 +362,7 @@
     const days = new Set(Array.from(S.sel).map((k) => (S.view.get(k) || {}).date)).size;
     const who = hostName() || 'Your advisor';
     const head = S.justSubmitted
-      ? '<h2>You’re all set' + (firstName() ? ', ' + esc(firstName()) : '') + '</h2><p class="muted">' + esc(who) + ' will confirm a meeting time with you.</p>'
+      ? '<h2>You’re all set' + (firstName() ? ', ' + esc(firstName()) : '') + '</h2><p class="muted">We emailed you a copy with a link to change your times. ' + esc(who) + ' will email you once your meeting time is confirmed.</p>'
       : '<h2>You’ve already responded</h2><p class="muted">You can update your times or notes until sign-ups close.</p>';
     return '<div class="done">' +
       '<div class="done-icon">' + icon('check') + '</div>' + head +

@@ -51,7 +51,7 @@ Use a **personal Gmail account**. University-managed Google accounts often block
   2. Copy the calendar's ID (under *Integrate calendar*; for your main calendar it's your email address).
   3. Add the ID to the Settings list, separated by a comma.
   4. If the site can't read a calendar, an orange note appears above the grid.
-- **Email alerts.** Each new or updated response emails the Google account that owns the script. The email has the student's name, time needed, topic, availability and a link to the Responses tab. Replying goes to the student if they gave an email. Turn alerts off in ⚙︎ Settings.
+- **Email alerts.** Each new or updated response emails the Google account that owns the script, or the address under ⚙︎ Settings → *Send these alerts to*. The email has the student's name, time needed, topic, availability and a link to the Responses tab. Replying goes to the student if they gave an email. Turn alerts off in ⚙︎ Settings.
 - These features need the permissions listed in [`apps-script/appsscript.json`](apps-script/appsscript.json): this spreadsheet only, read-only calendar, send email as you, and your email address. To set them up, paste that file in the editor after turning on *Project Settings → Show "appsscript.json" manifest file*.
 
 ## Each week
@@ -60,10 +60,12 @@ Use a **personal Gmail account**. University-managed Google accounts often block
 2. Drag on the grid to mark your free times, or click **Copy last week** and adjust.
 3. Optional: change the slot length (15/30 min), the minimum number of slots per student, or add a note to students.
 4. Click **Publish**. The student link appears on the right with a **Copy** button. Send it out.
-5. Watch the **Responses** tab. Click a student to see only their times. Click **Suggest schedule** for a non-overlapping plan, then **Copy** it to email out. Students aren't notified automatically.
-6. Turn off **Accepting responses** to close sign-ups.
+5. Watch the **Responses** tab. Click a student to see only their times.
+6. Click **Suggest schedule**. It fits everyone it can, keeping meetings back to back where possible. Drag a meeting on the grid to move it, use **×** to take someone out, or **Place** to put an unscheduled student at a time you click.
+7. Click **Confirm & email students**. Each student gets their time with a calendar file attached. If you move someone later and confirm again, only they get an "Updated meeting time" email. **.ics** downloads the whole schedule for your own calendar (Google Calendar → Settings → Import & export → Import).
+8. Turn off **Accepting responses** (then **Save**) to close sign-ups.
 
-A student who opens their link again sees their saved answer and can edit it until sign-ups close. Edits from the same browser update that response. A submission from another device, or under a different name, is saved as a separate response, so nobody can overwrite someone else's answer. If a student ends up with two, delete the older one in the Responses tab.
+A student who opens their link again sees their saved answer and can edit it until sign-ups close. Students must give an email address. They get a receipt with their times and a private link to change them from any device. Edits from the same browser, or through that link, update that response. A submission from another device, or under a different name, is saved as a separate response, so nobody can overwrite someone else's answer. If a student ends up with two, delete the older one in the Responses tab.
 
 ## Good to know
 

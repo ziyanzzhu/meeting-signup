@@ -44,6 +44,7 @@
   const slotKey = (date, min) => date + 'T' + fromMin(min);
   const splitKey = (k) => [k.slice(0, 10), toMin(k.slice(11, 16))];
   const SLOT_RE = /^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d$/;
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   const SITE_RE = /^https:\/\/[\w.-]+(\/[\w.~%\/-]*)?$/;
   const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -178,6 +179,7 @@
     calendars: 'primary',
     notify: true,
     site: '',
+    notifyTo: '',
   };
   function validTz(tz) {
     if (typeof tz !== 'string' || !/^[A-Za-z_]+(\/[A-Za-z0-9_+\-]+)*$/.test(tz)) return false;
@@ -207,6 +209,7 @@
       calendars: clip(s.calendars == null ? DEFAULT_SETTINGS.calendars : s.calendars, 500).trim(),
       notify: s.notify !== false,
       site: SITE_RE.test(String(s.site || '')) ? String(s.site).slice(0, 300) : '',
+      notifyTo: EMAIL_RE.test(String(s.notifyTo || '').trim()) ? String(s.notifyTo).trim().slice(0, 120) : '',
     };
   }
   function normalizeWeek(w) {
@@ -235,6 +238,8 @@
     if (!name) throw new Error('Please enter your name.');
     const topic = clip(r.topic, 4000).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim();
     if (!topic) throw new Error('Please say what you would like to talk about.');
+    const email = clip(r.email, 120).replace(/[\s\u0000-\u001f\u007f]/g, '');
+    if (!EMAIL_RE.test(email)) throw new Error('Please enter your email so you can get your meeting time.');
     const duration = Number(r.duration);
     if (!(duration >= 5 && duration <= 480)) throw new Error('Please choose how much time you need.');
     if (Array.isArray(r.slots) && r.slots.length > 2000) throw new Error('Too many times selected.');
@@ -247,7 +252,7 @@
     return {
       id: String(r.id || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) || newId(),
       name: name,
-      email: clip(r.email, 120).replace(/[\s\u0000-\u001f\u007f]/g, ''),
+      email: email,
       topic: topic,
       duration: Math.round(duration),
       slots: slots,
@@ -302,6 +307,7 @@
           return { ok: true, settings: settings, week: db.weeks[req.weekId] || null, responses: db.responses[req.weekId] || [] };
         case 'saveWeek': {
           const w = normalizeWeek(req.week);
+          if (db.weeks[w.id] && db.weeks[w.id].confirmed) w.confirmed = db.weeks[w.id].confirmed;
           w.updated = now;
           db.weeks[w.id] = w;
           db.settings = Object.assign({}, settings, { increment: w.increment, minMinutes: w.minMinutes });
@@ -315,6 +321,24 @@
         }
         case 'busy':
           return { ok: true, busy: [], errors: [] };
+        case 'getMine': {
+          const r = (db.responses[req.weekId] || []).find((x) => x.id === req.id);
+          if (!r) throw new Error('This edit link isn’t valid anymore. You can send a new response.');
+          return { ok: true, response: r };
+        }
+        case 'confirm': {
+          const w = db.weeks[req.weekId];
+          if (!w) throw new Error('Publish this week first.');
+          const byId = {};
+          (db.responses[req.weekId] || []).forEach((r) => { byId[r.id] = r; });
+          const items = (req.items || []).filter((it) => byId[it.id]).map((it) => ({
+            id: it.id, name: byId[it.id].name, email: byId[it.id].email, date: it.date, start: it.start, end: it.end,
+            startUtc: it.startUtc, endUtc: it.endUtc, seq: 0, sentAt: now,
+          }));
+          w.confirmed = { at: now, items: items };
+          store.set(DB_KEY, db);
+          return { ok: true, week: w, emailed: [], skipped: [] };
+        }
         case 'deleteResponse': {
           const list = db.responses[req.weekId] || [];
           db.responses[req.weekId] = list.filter((x) => x.id !== req.id);
@@ -357,7 +381,7 @@
       }
       if (picked.length < need) picked = w.slots.slice();
       const t = new Date(Date.now() - (people.length - i) * 60000).toISOString();
-      list.push({ id: 'sample-' + (i + 1), name: p[0], email: '', topic: p[1], duration: p[2], slots: uniq(picked).sort(), submitted: t, updated: t });
+      list.push({ id: 'sample-' + (i + 1), name: p[0], email: p[0].split(' ')[0].toLowerCase() + '@example.edu', topic: p[1], duration: p[2], slots: uniq(picked).sort(), submitted: t, updated: t });
     });
     db.responses[weekId] = list;
     store.set(DB_KEY, db);
@@ -389,7 +413,9 @@
   const api = {
     getWeek: (weekId) => call('getWeek', { weekId: weekId || null }),
     submit: (weekId, response) => call('submit', { weekId: weekId, response: response }),
-    adminLoad: (key, weekId) => call('adminLoad', { key: key, weekId: weekId }),
+    adminLoad: (key, weekId) => call('adminLoad', { key: key, weekId: weekId, site: siteBase() }),
+    getMine: (weekId, id) => call('getMine', { weekId: weekId, id: id }),
+    confirm: (key, weekId, items) => call('confirm', { key: key, weekId: weekId, items: items }),
     saveWeek: (key, week) => call('saveWeek', { key: key, week: week, site: siteBase() }),
     saveSettings: (key, settings) => call('saveSettings', { key: key, settings: settings, site: siteBase() }),
     busy: (key, weekId) => call('busy', { key: key, weekId: weekId }),
@@ -494,8 +520,19 @@
     }
   }
 
+  function ics(events) {
+    const stamp = icsTime(new Date().toISOString());
+    const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//meeting-signup//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH'];
+    events.forEach((e) => lines.push('BEGIN:VEVENT', 'UID:' + e.uid + '@meeting-signup', 'SEQUENCE:' + (e.seq || 0), 'DTSTAMP:' + stamp,
+      'DTSTART:' + icsTime(e.start), 'DTEND:' + icsTime(e.end), 'SUMMARY:' + icsText(e.title), 'DESCRIPTION:' + icsText(e.desc || ''), 'END:VEVENT'));
+    lines.push('END:VCALENDAR');
+    return lines.map((line) => { const out = []; while (line.length > 74) { out.push(line.slice(0, 74)); line = ' ' + line.slice(74); } out.push(line); return out.join('\r\n'); }).join('\r\n') + '\r\n';
+  }
+  function icsTime(iso) { return String(iso).replace(/\.\d{3}Z$/, 'Z').replace(/[-:]/g, ''); }
+  function icsText(t) { return String(t).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n'); }
+
   window.Meet = {
-    DEMO, api, store, drag, icon, toast, copyText, esc, newId, uniq, demoAddSamples,
+    DEMO, api, store, drag, icon, toast, copyText, esc, newId, uniq, demoAddSamples, ics,
     pad, parseYmd, fmtYmd, addDays, dow, mondayOf, localToday, todayIn, toMin, fromMin, slotKey, splitKey,
     DOW, DOW_LONG, MON, fmtTime, fmtHour, fmtRange, fmtDay, fmtWeekRange, fmtDateSpan, fmtDuration, fmtStamp, tzLabel, tzShort, browserTz, initials,
     slotIn,

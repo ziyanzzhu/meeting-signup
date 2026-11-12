@@ -81,7 +81,9 @@
     A.week = d.week;
     A.responses = d.responses || [];
     A.draft = makeDraft(d.week);
-    A.dirty = false; A.focus = null; A.schedule = null; A.view = 'heat';
+    A.dirty = false; A.focus = null; A.placing = null;
+    A.schedule = d.week && d.week.confirmed ? fromConfirmed() : null;
+    A.view = A.schedule ? 'schedule' : 'heat';
     syncUrl();
   }
 
@@ -349,7 +351,7 @@
           (A.view === 'heat' && !A.focus ? '<span class="legend">fewer<span class="ramp"></span>more students</span>' : '') +
           '<span class="spacer"></span>' +
           '<button class="btn sm ghost icon" data-act="refresh" aria-label="Refresh responses" title="Refresh responses">' + icon('refresh') + '</button>' +
-          '<button class="btn sm primary" data-act="suggest"' + (n ? '' : ' disabled') + '>' + icon('sparkles') + 'Suggest schedule</button>' +
+          '<button class="btn sm primary" data-act="suggest"' + (n ? '' : ' disabled') + '>' + icon('sparkles') + (A.schedule ? 'Suggest again' : 'Suggest schedule') + '</button>' +
         '</div>' +
         '<div id="grid"></div>' +
       '</section>' +
@@ -386,30 +388,86 @@
     '</div>';
   }
 
+  const needFor = (r) => Math.max(A.week.increment, Math.ceil((Number(r.duration) || 30) / A.week.increment) * A.week.increment);
+  const respById = () => new Map(A.responses.map((r) => [r.id, r]));
+  const confirmedItems = () => (A.week && A.week.confirmed && A.week.confirmed.items) || [];
+  const utcOf = (d, m) => new Date(M.slotIn(M.slotKey(d, m), A.settings.timezone, A.settings.timezone).t).toISOString();
+
+  // Status of one meeting compared with what students were last emailed.
+  function statusOf(it) {
+    const c = confirmedItems().find((x) => x.id === it.id);
+    if (!c) return 'new';
+    if (c.date !== it.date || c.start !== it.start || c.end !== it.end) return 'changed';
+    return c.sentAt ? 'sent' : 'unsent';
+  }
+  const STATUS = { sent: '✓ Emailed', unsent: 'Not emailed (no email address)', changed: 'Moved · will email the new time', new: '' };
+
   function scheduleSec() {
     const sc = A.schedule;
+    const st = sc.items.map(statusOf);
+    const toSend = st.filter((x) => x === 'new' || x === 'changed').length;
+    const isConfirmed = confirmedItems().length && !toSend;
     return '<div class="side-sec">' +
-      '<div class="sec-head"><h3>Suggested schedule</h3><button class="btn sm ghost" data-act="copy-schedule">' + icon('copy') + 'Copy</button></div>' +
+      '<div class="sec-head"><h3>' + (isConfirmed ? 'Confirmed schedule' : 'Schedule') + '</h3>' +
+        '<span class="sec-actions"><button class="btn sm ghost icon" data-act="copy-schedule" title="Copy as text" aria-label="Copy as text">' + icon('copy') + '</button>' +
+        '<button class="btn sm ghost" data-act="ics" title="Download a calendar file to import into Google Calendar">' + icon('calendar') + '.ics</button></span></div>' +
+      (A.placing
+        ? '<div class="placing">Click a start time on the grid for <b>' + esc((respById().get(A.placing) || {}).name || '') + '</b>. <button class="linkbtn" data-act="cancel-place">Cancel</button></div>'
+        : '<p class="muted small" style="margin-bottom:8px">Drag a meeting on the grid to move it.</p>') +
       (sc.items.length
-        ? '<ol class="sched">' + sc.items.map((it) =>
+        ? '<ol class="sched">' + sc.items.map((it, i) =>
             '<li><span class="cdot" style="--c:' + it.color + '"></span><div><b>' + esc(it.name) + '</b>' +
-            '<span>' + esc(M.fmtDay(it.date)) + ' · ' + esc(M.fmtRange(it.start, it.end)) + '</span></div></li>').join('') + '</ol>'
-        : '<p class="muted small">No one could be placed.</p>') +
-      (sc.unfit.length ? '<div class="unfit"><b>Couldn’t fit:</b> ' + sc.unfit.map((u) => esc(u.name) + ' (' + esc(u.reason) + ')').join('; ') + '</div>' : '') +
+            '<span>' + esc(M.fmtDay(it.date)) + ' · ' + esc(M.fmtRange(it.start, it.end)) + '</span>' +
+            (it.outside ? '<span class="warn-t">Outside the times they picked</span>' : '') +
+            (STATUS[st[i]] ? '<span class="st st-' + st[i] + '">' + STATUS[st[i]] + '</span>' : '') +
+            '</div><button class="btn ghost icon x" data-act="unschedule" data-id="' + esc(it.id) + '" title="Take out of the schedule" aria-label="Take ' + esc(it.name) + ' out of the schedule">' + icon('x') + '</button></li>').join('') + '</ol>'
+        : '<p class="muted small">No one is scheduled.</p>') +
+      (sc.unfit.length
+        ? '<div class="unfit"><b>Not scheduled</b><ul>' + sc.unfit.map((u) =>
+            '<li>' + esc(u.name) + ' <span>(' + esc(u.reason) + ')</span> <button class="linkbtn" data-act="place" data-id="' + esc(u.id) + '">Place</button></li>').join('') + '</ul></div>'
+        : '') +
       (sc.partial ? '<p class="muted small" style="margin-top:10px">Big group: this is the best arrangement found quickly, and a better one may exist.</p>' : '') +
-      '<p class="muted small" style="margin-top:10px">A starting point only. Students aren’t notified, so send them their times.</p>' +
+      '<button class="btn primary block" data-act="confirm" style="margin-top:14px"' + (toSend ? '' : ' disabled') + '>' +
+        (toSend ? icon('check') + 'Confirm & email ' + toSend + ' student' + (toSend === 1 ? '' : 's') : 'Everyone has been emailed') + '</button>' +
+      '<p class="muted small" style="margin-top:8px">Each student gets their time by email with a calendar file. If you move someone later, only they get an update.</p>' +
     '</div>';
   }
 
-  // Fit each student's requested length into times they marked, with no overlaps, placing as many as possible.
+  // Cells, colors and warnings for a list of meetings.
+  function finalizeSchedule(items, unfit, partial) {
+    const inc = A.week.increment, rmap = respById();
+    items.forEach((it) => {
+      it.cells = [];
+      for (let m = it.start; m < it.end; m += inc) it.cells.push(M.slotKey(it.date, m));
+      const mine = new Set((rmap.get(it.id) || { slots: [] }).slots);
+      it.outside = it.cells.some((k) => !mine.has(k));
+      it.color = colorOf(it.id);
+    });
+    items.sort((a, b) => (a.date + M.fromMin(a.start)).localeCompare(b.date + M.fromMin(b.start)));
+    const byCell = new Map();
+    items.forEach((it) => it.cells.forEach((k) => byCell.set(k, it)));
+    return { items: items, unfit: unfit, byCell: byCell, partial: !!partial };
+  }
+
+  function fromConfirmed() {
+    const rmap = respById();
+    const items = confirmedItems().filter((x) => rmap.has(x.id))
+      .map((x) => ({ id: x.id, name: rmap.get(x.id).name, date: x.date, start: x.start, end: x.end }));
+    const placed = new Set(items.map((x) => x.id));
+    const unfit = sortedResponses().filter((r) => !placed.has(r.id)).map((r) => ({ id: r.id, name: r.name, reason: 'not scheduled' }));
+    return finalizeSchedule(items, unfit, false);
+  }
+
+  // Fit each student's requested length into times they marked, with no overlaps, placing as many as
+  // possible; among equally full schedules, prefer back-to-back meetings (fewest separate blocks, least idle time).
   function suggest() {
-    const w = A.week, inc = w.increment, offered = new Set(w.slots);
-    const people = sortedResponses().map((r, idx) => {
+    const w = A.week, offered = new Set(w.slots);
+    const people = sortedResponses().map((r) => {
       const set = new Set(r.slots.filter((k) => offered.has(k)));
-      const need = Math.max(inc, Math.ceil((Number(r.duration) || 30) / inc) * inc);
+      const need = needFor(r), inc = w.increment;
       const cands = [];
-      Array.from(set).sort().forEach((s) => {
-        const [d, m] = M.splitKey(s);
+      Array.from(set).sort().forEach((s0) => {
+        const [d, m] = M.splitKey(s0);
         const cells = [];
         for (let i = 0; i < need / inc; i++) {
           const key = M.slotKey(d, m + i * inc);
@@ -418,11 +476,11 @@
         }
         cands.push({ date: d, start: m, end: m + need, cells: cells });
       });
-      return { r: r, need: need, cands: cands, color: COLORS[idx % COLORS.length], any: set.size > 0 };
+      return { r: r, need: need, cands: cands, any: set.size > 0 };
     });
     const order = people.filter((p) => p.cands.length).sort((a, b) => a.cands.length - b.cands.length);
     const used = new Set(), cur = [];
-    // Greedy first pass (shortest meetings first, earliest free spot) gives a good starting point.
+    // 1. Most students possible: greedy start, then a bounded exhaustive search.
     const greedy = [];
     order.slice().sort((a, b) => a.need - b.need || a.cands.length - b.cands.length).forEach((p) => {
       const c = p.cands.find((x) => !x.cells.some((k) => used.has(k)));
@@ -448,17 +506,191 @@
       dfs(i + 1, n); // leave this student out
     })(0, 0);
 
-    const items = best.pick
-      .map((x) => ({ id: x.p.r.id, name: x.p.r.name, date: x.c.date, start: x.c.start, end: x.c.end, cells: x.c.cells, color: x.p.color }))
-      .sort((a, b) => (a.date + M.fromMin(a.start)).localeCompare(b.date + M.fromMin(b.start)));
-    const placed = new Set(items.map((x) => x.id));
-    const unfit = people.filter((p) => !placed.has(p.r.id)).map((p) => ({
+    // 2. Same number of students, but as back-to-back as possible.
+    const score = (pick) => {
+      const xs = pick.map((x) => x.c).sort((a, b) => (a.date + M.fromMin(a.start)).localeCompare(b.date + M.fromMin(b.start)));
+      let blocks = 0, idle = 0;
+      xs.forEach((c, i) => {
+        const prev = xs[i - 1];
+        if (!prev || prev.date !== c.date || prev.end !== c.start) blocks++;
+        if (prev && prev.date === c.date) idle += c.start - prev.end;
+      });
+      return blocks * 10000 + idle;
+    };
+    let seed = 7;
+    const rand = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+    const touches = (c, placed) => placed.some((x) => x.date === c.date && (x.end === c.start || x.start === c.end));
+    let bestPick = best.pick, bestScore = score(best.pick);
+    const t0 = Date.now();
+    for (let it = 0; it < 600 && Date.now() - t0 < 400; it++) {
+      const ord = order.slice().sort((a, b) => a.cands.length - b.cands.length + (rand() - 0.5) * 4);
+      const occ = new Set(), placed = [], pick = [];
+      ord.forEach((p) => {
+        const free = p.cands.filter((c) => !c.cells.some((k) => occ.has(k)));
+        if (!free.length) return;
+        const adj = free.filter((c) => touches(c, placed));
+        const pool = adj.length ? adj : free;
+        const c = it === 0 ? pool[0] : pool[Math.floor(rand() * Math.min(pool.length, 3))];
+        c.cells.forEach((k) => occ.add(k));
+        placed.push(c); pick.push({ p: p, c: c });
+      });
+      if (pick.length === best.n) { const sc = score(pick); if (sc < bestScore) { bestScore = sc; bestPick = pick; } }
+    }
+    // 3. Polish: move single meetings to any free spot that makes the schedule tighter.
+    for (let round = 0, improved = true; improved && round < 60; round++) {
+      improved = false;
+      for (let i = 0; i < bestPick.length && !improved; i++) {
+        const occ = new Set();
+        bestPick.forEach((x, j) => { if (j !== i) x.c.cells.forEach((k) => occ.add(k)); });
+        for (const c of bestPick[i].p.cands) {
+          if (c === bestPick[i].c || c.cells.some((k) => occ.has(k))) continue;
+          const trial = bestPick.slice();
+          trial[i] = { p: bestPick[i].p, c: c };
+          const sc = score(trial);
+          if (sc < bestScore) { bestScore = sc; bestPick = trial; improved = true; break; }
+        }
+      }
+    }
+
+    const items = bestPick.map((x) => ({ id: x.p.r.id, name: x.p.r.name, date: x.c.date, start: x.c.start, end: x.c.end }));
+    const placedIds = new Set(items.map((x) => x.id));
+    const unfit = people.filter((p) => !placedIds.has(p.r.id)).map((p) => ({
+      id: p.r.id,
       name: p.r.name,
       reason: !p.any ? 'no times selected' : !p.cands.length ? 'no ' + M.fmtDuration(p.need) + ' stretch free' : 'overlaps with others',
     }));
-    const byCell = new Map();
-    items.forEach((it) => it.cells.forEach((k) => byCell.set(k, it)));
-    return { items: items, unfit: unfit, byCell: byCell, partial: partial };
+    return finalizeSchedule(items, unfit, partial);
+  }
+
+  // ── editing the schedule by hand ──
+  function rangeFree(date, start, end, ignoreId) {
+    const inc = A.week.increment;
+    for (let m = start; m < end; m += inc) {
+      const o = A.schedule.byCell.get(M.slotKey(date, m));
+      if (o && o.id !== ignoreId) return false;
+    }
+    return start >= 0 && end <= 1440;
+  }
+  function moveItem(id, date, start) {
+    const items = A.schedule.items.map((x) => (x.id === id ? { id: x.id, name: x.name, date: date, start: start, end: start + (x.end - x.start) } : x));
+    A.schedule = finalizeSchedule(items, A.schedule.unfit, A.schedule.partial);
+    render();
+  }
+  function placeAt(date, start) {
+    const r = respById().get(A.placing);
+    if (!r) { A.placing = null; render(); return; }
+    const end = start + needFor(r);
+    if (!rangeFree(date, start, end, null)) { M.toast('That overlaps another meeting.'); return; }
+    const items = A.schedule.items.concat([{ id: r.id, name: r.name, date: date, start: start, end: end }]);
+    const unfit = A.schedule.unfit.filter((u) => u.id !== r.id);
+    A.placing = null;
+    A.schedule = finalizeSchedule(items, unfit, A.schedule.partial);
+    render();
+  }
+  function unschedule(id) {
+    const it = A.schedule.items.find((x) => x.id === id);
+    if (!it) return;
+    const items = A.schedule.items.filter((x) => x.id !== id);
+    const unfit = A.schedule.unfit.concat([{ id: it.id, name: it.name, reason: 'taken out by you' }]);
+    A.schedule = finalizeSchedule(items, unfit, A.schedule.partial);
+    render();
+  }
+
+  // Drag a meeting to a new start time on the schedule grid (or click a time while placing someone).
+  function attachMove(cal) {
+    const body = cal.querySelector('.cal-body');
+    let mv = null;
+    const cellAt = (e) => { const el = document.elementFromPoint(e.clientX, e.clientY); const c = el && el.closest('.cell'); return c && body.contains(c) ? c : null; };
+    const clear = () => body.querySelectorAll('.drop, .drop-bad').forEach((c) => c.classList.remove('drop', 'drop-bad'));
+    const plan = (cell) => {
+      const [d, m] = M.splitKey(cell.dataset.k);
+      const len = mv.item.end - mv.item.start, start = m - mv.offset;
+      const cells = [];
+      for (let t = start; t < start + len; t += A.week.increment) {
+        const c = body.querySelector('.cell[data-k="' + M.slotKey(d, t) + '"]');
+        if (!c) return { ok: false, cells: [cell] };
+        cells.push(c);
+      }
+      return { ok: rangeFree(d, start, start + len, mv.item.id), cells: cells, date: d, start: start };
+    };
+    body.addEventListener('pointerdown', (e) => {
+      const cell = e.target.closest('.cell');
+      if (!cell || e.button !== 0) return;
+      if (A.placing) { e.preventDefault(); const [d, m] = M.splitKey(cell.dataset.k); placeAt(d, m); return; }
+      const it = A.schedule.byCell.get(cell.dataset.k);
+      if (!it) return;
+      e.preventDefault();
+      body.setPointerCapture(e.pointerId);
+      mv = { item: it, offset: M.splitKey(cell.dataset.k)[1] - it.start, last: null, plan: null };
+      cal.classList.add('grabbing');
+    });
+    body.addEventListener('pointermove', (e) => {
+      if (!mv) return;
+      const c = cellAt(e);
+      if (!c || c === mv.last) return;
+      mv.last = c;
+      clear();
+      mv.plan = plan(c);
+      mv.plan.cells.forEach((x) => x.classList.add(mv.plan.ok ? 'drop' : 'drop-bad'));
+    });
+    const end = () => {
+      if (!mv) return;
+      const p = mv.plan, it = mv.item;
+      mv = null; clear(); cal.classList.remove('grabbing');
+      if (!p) return;
+      if (!p.ok) { M.toast('That time overlaps another meeting or runs off the grid.'); return; }
+      if (p.date !== it.date || p.start !== it.start) moveItem(it.id, p.date, p.start);
+    };
+    body.addEventListener('pointerup', end);
+    body.addEventListener('pointercancel', () => { mv = null; clear(); cal.classList.remove('grabbing'); });
+  }
+
+  // ── confirm & export ──
+  async function confirmSchedule() {
+    const sc = A.schedule;
+    if (!sc || !sc.items.length) return;
+    const toSend = sc.items.filter((it) => ['new', 'changed'].includes(statusOf(it)));
+    if (!toSend.length) { M.toast('Everyone already has their current time.'); return; }
+    const lines = toSend.map((it) => '• ' + it.name + ': ' + M.fmtDay(it.date) + ', ' + M.fmtRange(it.start, it.end) + (statusOf(it) === 'changed' ? ' (moved)' : ''));
+    if (!confirm('Email ' + toSend.length + ' student' + (toSend.length === 1 ? '' : 's') + ' their meeting time?\n\n' + lines.join('\n') +
+      (sc.unfit.length ? '\n\nNot scheduled, no email: ' + sc.unfit.map((u) => u.name).join(', ') : ''))) return;
+    const id = A.weekId, seq = loadSeq;
+    const items = sc.items.map((it) => ({ id: it.id, date: it.date, start: it.start, end: it.end, startUtc: utcOf(it.date, it.start), endUtc: utcOf(it.date, it.end) }));
+    setBusy(true);
+    try {
+      const res = await M.api.confirm(A.key, id, items);
+      if (!stillOn(id, seq)) return;
+      A.week = res.week;
+      cacheNow();
+      A.schedule = fromConfirmed();
+      A.view = 'schedule';
+      render();
+      M.toast(M.DEMO ? 'Demo: confirmed (no emails in demo mode)' : 'Emailed ' + res.emailed.length + ' student' + (res.emailed.length === 1 ? '' : 's'));
+      if (res.skipped && res.skipped.length) alert('Not emailed:\n' + res.skipped.map((x) => '• ' + (x.name || '?') + ': ' + x.reason).join('\n'));
+    } catch (e) {
+      setBusy(false);
+      M.toast(e.message);
+    }
+  }
+
+  function downloadIcs() {
+    const sc = A.schedule, rmap = respById();
+    if (!sc || !sc.items.length) return;
+    const events = sc.items.map((it) => {
+      const r = rmap.get(it.id) || {};
+      return {
+        uid: A.weekId + '-' + it.id + '-host', start: utcOf(it.date, it.start), end: utcOf(it.date, it.end),
+        title: 'Meeting: ' + it.name,
+        desc: ['Topic: ' + (r.topic || ''), 'Time needed: ' + M.fmtDuration(r.duration || 0), r.email ? 'Email: ' + r.email : ''].filter(Boolean).join('\n'),
+      };
+    });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([M.ics(events)], { type: 'text/calendar' }));
+    a.download = 'meetings-' + A.weekId + '.ics';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    M.toast('Downloaded. In Google Calendar: Settings → Import & export → Import');
   }
 
   function scheduleText() {
@@ -477,7 +709,9 @@
       if (!stillOn(id, seq)) return;
       A.responses = d.responses || [];
       if (!A.dirty) { A.week = d.week; A.draft = makeDraft(d.week); }
-      A.schedule = null; A.focus = null; A.view = 'heat';
+      A.focus = null; A.placing = null;
+      A.schedule = A.week && A.week.confirmed ? fromConfirmed() : null;
+      A.view = A.schedule ? 'schedule' : 'heat';
       cacheNow();
       render();
       M.toast(msg || 'Up to date');
@@ -496,7 +730,8 @@
       if (!stillOn(week, seq)) { M.store.del(cacheKey(week)); return; }
       A.responses = A.responses.filter((x) => x.id !== id);
       if (A.focus === id) A.focus = null;
-      A.schedule = null; A.view = 'heat';
+      A.schedule = A.week && A.week.confirmed ? fromConfirmed() : null;
+      A.view = A.schedule ? 'schedule' : 'heat';
       cacheNow();
       render();
       M.toast('Response deleted');
@@ -644,6 +879,7 @@
     } else {
       paintResp(cal);
       attachTooltip(cal);
+      if (A.view === 'schedule' && A.schedule) { cal.classList.add('sched'); attachMove(cal); }
     }
   }
 
@@ -696,7 +932,7 @@
         if (g !== 'free') {
           c.classList.add('as');
           c.style.setProperty('--c', g.color);
-          if (prev !== g) c.innerHTML = '<span class="lbl">' + esc(g.name) + '</span>';
+          if (prev !== g) c.innerHTML = '<span class="lbl">' + (g.outside ? '⚠ ' : '') + esc(g.name) + '</span>';
           continue;
         }
         c.classList.add('offer');
@@ -782,7 +1018,10 @@
             '<div class="field"><label for="s-cal">Calendars to show as busy</label>' +
               '<input class="input" id="s-cal" name="calendars" maxlength="500" value="' + esc(s.calendars) + '" placeholder="primary">' +
               '<span class="help">“primary” is this Google account’s own calendar. To add another calendar (e.g. BC), share it with this Google account, then add its address here, separated by commas. Share with “See all event details” to see event titles, or “See only free/busy” to see just busy blocks.</span></div>' +
-            '<label class="check"><input type="checkbox" name="notify"' + (s.notify ? ' checked' : '') + '> Email me when a student responds</label>') +
+            '<label class="check"><input type="checkbox" name="notify"' + (s.notify ? ' checked' : '') + '> Email me when a student responds</label>' +
+            '<div class="field"><label for="s-notify">Send these alerts to</label>' +
+              '<input class="input" id="s-notify" name="notifyTo" type="email" maxlength="120" value="' + esc(s.notifyTo || '') + '" placeholder="The Google account that owns the script">' +
+              '<span class="help">Leave empty to use the Google account that owns the script.</span></div>') +
         '</div>' +
         '<div class="dlg-foot">' +
           (M.DEMO
@@ -813,7 +1052,7 @@
         dayStart: f.namedItem('dayStart').value,
         dayEnd: f.namedItem('dayEnd').value,
         weekends: f.namedItem('weekends').checked,
-        ...(M.DEMO ? {} : { calendars: f.namedItem('calendars').value, notify: f.namedItem('notify').checked }),
+        ...(M.DEMO ? {} : { calendars: f.namedItem('calendars').value, notify: f.namedItem('notify').checked, notifyTo: f.namedItem('notifyTo').value }),
       };
       if (M.toMin(next.dayEnd) <= M.toMin(next.dayStart)) { M.toast('The calendar has to end after it starts.'); return; }
       if (next.timezone !== s.timezone && !confirm('Change your time zone to ' + M.tzLabel(next.timezone) + '? Weeks you’ve already published keep their clock times, so students will see them shifted by the time difference.')) return;
@@ -894,7 +1133,20 @@
         try { M.demoAddSamples(A.weekId); } catch (err) { M.toast(err.message); return; }
         return refresh('Added 4 sample students. Try Suggest schedule');
       case 'suggest':
-        A.schedule = suggest(); A.view = 'schedule'; A.focus = null; render();
+        if (A.schedule && confirmedItems().length && !confirm('Replace your schedule with a new suggestion? Nothing is emailed until you confirm.')) return;
+        A.schedule = suggest(); A.view = 'schedule'; A.focus = null; A.placing = null; render();
+        return;
+      case 'confirm':
+        return confirmSchedule();
+      case 'ics':
+        return downloadIcs();
+      case 'unschedule':
+        return unschedule(el.dataset.id);
+      case 'place':
+        A.placing = el.dataset.id; A.view = 'schedule'; render();
+        return;
+      case 'cancel-place':
+        A.placing = null; render();
         return;
       case 'copy-schedule':
         M.copyText(scheduleText()).then((ok) => M.toast(ok ? 'Schedule copied' : 'Couldn’t copy'));
