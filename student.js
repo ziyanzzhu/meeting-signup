@@ -107,7 +107,7 @@
       M.store.del('meet-resp-' + weekId);
       S.saved = null; S.sel = new Set(); S.justSubmitted = false;
       S.form.topic = ''; S.form.duration = null;
-      if (S.step === 'done') { S.step = 'select'; render(); }
+      if (S.step === 'done') { S.step = 'select'; render(); M.toast('Your earlier response was removed, so you can respond again.'); }
     });
   }
 
@@ -302,7 +302,8 @@
     return '<div class="main-head"><h2>A few details</h2><p class="muted">This helps plan the meeting.</p></div>' +
       '<form class="form" id="details" novalidate>' +
         '<div class="field"><label for="f-name">Your name</label>' +
-          '<input class="input" id="f-name" name="name" autocomplete="name" maxlength="80" value="' + esc(f.name) + '"></div>' +
+          '<input class="input" id="f-name" name="name" autocomplete="name" maxlength="80" value="' + esc(f.name) + '">' +
+          '<span class="help" id="f-name-note"' + (renamed() ? '' : ' hidden') + '>A different name sends this as a separate response. Your earlier one (' + esc((S.saved || {}).name || '') + ') stays.</span></div>' +
         '<div class="field"><label for="f-email">Email</label>' +
           '<input class="input" id="f-email" name="email" type="email" autocomplete="email" maxlength="120" value="' + esc(f.email) + '">' +
           '<span class="help">You’ll get a confirmation with a link to change your times, and later your meeting time.</span></div>' +
@@ -315,14 +316,23 @@
         (S.formError ? '<div class="error" role="alert">' + esc(S.formError) + '</div>' : '') +
         '<div class="actions">' +
           '<button type="button" class="btn ghost" data-act="back">' + icon('left') + 'Back</button>' +
-          '<button type="submit" class="btn primary"' + (S.busy ? ' disabled' : '') + '>' + (S.busy ? 'Sending…' : (S.saved ? 'Update response' : 'Submit')) + '</button>' +
+          '<button type="submit" class="btn primary" id="f-submit"' + (S.busy ? ' disabled' : '') + '>' + (S.busy ? 'Sending…' : submitLabel()) + '</button>' +
         '</div>' +
       '</form>';
   }
 
+  // The server updates a response only for the same browser and the same name; another name is a new one.
+  const normName = (x) => String(x || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  const renamed = () => !!S.saved && normName(S.form.name) !== '' && normName(S.form.name) !== normName(S.saved.name);
+  const submitLabel = () => (renamed() ? 'Send as a new response' : S.saved ? 'Update response' : 'Submit');
   function bindDetails() {
     const form = document.getElementById('details');
-    form.addEventListener('input', () => { readForm(); clearError(); });
+    form.addEventListener('input', () => {
+      readForm(); clearError();
+      const note = document.getElementById('f-name-note'), btn = document.getElementById('f-submit');
+      if (note) note.hidden = !renamed();
+      if (btn && !S.busy) btn.textContent = submitLabel();
+    });
     form.addEventListener('submit', (e) => { e.preventDefault(); submit(); });
     if (!S.form.name) document.getElementById('f-name').focus();
   }
@@ -339,10 +349,10 @@
     readForm();
     const f = S.form;
     if (!f.name.trim()) return fail('Please enter your name.', 'f-name');
-    if (!f.topic.trim()) return fail('Please say what you would like to talk about.', 'f-topic');
-    if (!f.duration || !M.durationOptions(inc()).includes(f.duration)) return fail('Please choose how much time you think you need.', 'f-dur');
     if (!f.email.trim()) return fail('Please enter your email so you can get your meeting time.', 'f-email');
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.email.trim())) return fail('That email address doesn’t look right.', 'f-email');
+    if (!f.topic.trim()) return fail('Please say what you would like to talk about.', 'f-topic');
+    if (!f.duration || !M.durationOptions(inc()).includes(f.duration)) return fail('Please choose how much time you think you need.', 'f-dur');
     S.busy = true; S.formError = ''; render();
     try {
       let id = (S.saved && S.saved.id) || M.store.get('meet-id');
@@ -384,7 +394,7 @@
     const days = new Set(Array.from(S.sel).map((k) => (S.view.get(k) || {}).date)).size;
     const who = hostName() || 'Your advisor';
     const head = S.justSubmitted
-      ? '<h2>You’re all set' + (firstName() ? ', ' + esc(firstName()) : '') + '</h2><p class="muted">We emailed you a copy with a link to change your times. ' + esc(who) + ' will email you once your meeting time is confirmed.</p>'
+      ? '<h2>You’re all set' + (firstName() ? ', ' + esc(firstName()) : '') + '</h2><p class="muted">' + (M.DEMO ? 'Demo mode: no emails are sent. ' : 'We emailed you a copy with a link to change your times. ') + esc(who) + ' will email you once your meeting time is confirmed.</p>'
       : '<h2>You’ve already responded</h2><p class="muted">You can update your times or notes until sign-ups close.</p>';
     return '<div class="done">' +
       '<div class="done-icon">' + icon('check') + '</div>' + head +

@@ -27,6 +27,7 @@
   const coarse = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches); // phones/tablets: tap, don't drag
   let loadSeq = 0; // ignores slow replies for a week you've already navigated away from
   let viewFor = null; // week whose opening view was picked; after that, refreshes keep the view you chose
+  let viewFresh = false, viewTouched = false;
   const cacheKey = (id) => 'meet-admin-cache-' + id;
 
   const qs = new URLSearchParams(location.search);
@@ -80,7 +81,7 @@
   const stillOn = (id, seq) => A.weekId === id && loadSeq === seq;
   const draftKey = (d) => JSON.stringify([d.increment, d.minMinutes, Array.from(d.slots).sort(), d.open, d.note]);
 
-  function applyLoaded(id, d) {
+  function applyLoaded(id, d, fresh) {
     A.settings = d.settings;
     A.weekId = id;
     A.week = d.week;
@@ -88,7 +89,11 @@
     A.draft = makeDraft(d.week);
     A.dirty = false; A.focus = null; A.placing = null;
     A.schedule = d.week && d.week.confirmed ? fromConfirmed() : null;
-    if (viewFor !== id) { A.view = A.schedule ? 'schedule' : 'heat'; viewFor = id; } // a week opens on its schedule if confirmed
+    // A week opens on its schedule if confirmed. The fresh copy can correct what an older cached copy
+    // picked (e.g. confirmed on another device), unless you've switched views yourself meanwhile.
+    if (viewFor !== id) { viewFor = id; viewFresh = false; viewTouched = false; A.view = A.schedule ? 'schedule' : 'heat'; }
+    else if (fresh && !viewFresh && !viewTouched) A.view = A.schedule ? 'schedule' : 'heat';
+    if (fresh) viewFresh = true;
     keepView();
     syncUrl();
   }
@@ -116,7 +121,8 @@
   }
   function prefetchAround(id) {
     if (M.DEMO) return;
-    setTimeout(() => { if (A.weekId === id) { prefetch(M.addDays(id, 7)); prefetch(M.addDays(id, -7)); } }, 300);
+    const seq = loadSeq;
+    setTimeout(() => { if (A.weekId === id && loadSeq === seq) { prefetch(M.addDays(id, 7)); prefetch(M.addDays(id, -7)); } }, 300);
   }
 
   async function load(id) {
@@ -125,7 +131,7 @@
     const trusted = M.DEMO || M.store.get('meet-admin-key') === A.key; // key already verified here
     if (trusted) loadBusy(id); // your calendar, in parallel with the week itself
     const cached = M.DEMO || !trusted ? null : M.store.get(cacheKey(id));
-    if (cached) { applyLoaded(id, cached); render(); }
+    if (cached) { applyLoaded(id, cached, false); render(); }
     else if (first) root.innerHTML = '<div class="center"><div class="spinner" aria-label="Loading"></div></div>';
     else setBusy(true);
     try {
@@ -143,13 +149,13 @@
         if (A.tab === 'resp') render();
         return;
       }
-      applyLoaded(id, d);
+      applyLoaded(id, d, true);
       render();
     } catch (e) {
       if (seq !== loadSeq) return;
       if (/admin key/i.test(e.message)) {
         A.key = ''; M.store.del('meet-admin-key'); clearAdminCache();
-        A.busy = {}; dropPrefetch();
+        resetBusy(); dropPrefetch();
         renderLogin(e.message);
       } else if (cached) {
         M.toast('Showing saved data. Couldn’t refresh: ' + e.message);
@@ -198,7 +204,7 @@
       '</div>' +
       '<nav class="weeknav" aria-label="Week">' +
         '<button class="btn ghost icon" data-act="prev" aria-label="Previous week" title="Previous week">' + icon('left') + '</button>' +
-        '<div class="week-label">' + esc(M.fmtWeekRange(A.weekId)) + '</div>' +
+        '<div class="week-label">' + esc(M.fmtWeekRange(A.weekId, A.settings && A.settings.weekends ? 7 : 5)) + '</div>' +
         '<button class="btn ghost icon" data-act="next" aria-label="Next week" title="Next week">' + icon('right') + '</button>' +
         '<button class="btn sm" data-act="this-week"' + (A.weekId === defaultWeek() ? ' disabled' : '') + '>This week</button>' +
       '</nav>' +
@@ -285,7 +291,7 @@
 
   function markDirty() {
     A.dirty = true;
-    A.schedule = null;
+    if (A.schedule && !A.schedule.fromServer) A.schedule = null; // a suggestion may use times you just changed
     const st = statusInfo();
     const el = document.getElementById('status');
     if (el) { el.className = 'status ' + st.cls; el.innerHTML = '<span class="dot"></span>' + st.text; }
@@ -324,6 +330,7 @@
       if (draftKey(A.draft) === sent) { A.draft = makeDraft(res.week); A.dirty = false; } // else keep edits made while saving
       A.settings.increment = res.week.increment;
       A.settings.minMinutes = res.week.minMinutes;
+      if (!A.schedule && A.week.confirmed) A.schedule = fromConfirmed(); // keep showing what students were told
       cacheNow();
       render();
       if (first) {
@@ -418,24 +425,37 @@
 
   // Status of one meeting compared with what students were last emailed.
   const invitesOn = () => !!(A.settings && A.settings.invites);
+  // What confirming would do for one meeting; mirrors confirm_ in Code.gs. A meeting keeps the way it was
+  // first sent (invitation or calendar file), whatever the setting is now.
   function statusOf(it) {
     const c = confirmedItems().find((x) => x.id === it.id);
     if (!c) return 'new';
     if (c.date !== it.date || c.start !== it.start || c.end !== it.end) return 'changed';
-    if (!c.sentAt) return 'unsent';
-    if (invitesOn() && !c.invitedAt) return 'invite'; // emailed before invitations were on
+    const r = respById().get(it.id);
+    if (r && String(r.email || '').toLowerCase() !== String(c.email || '').toLowerCase()) return 'email';
+    if (!c.sentAt) return c.mailError ? 'retry' : 'unsent';
+    if (c.eventId && (c.inviteError || (c.copy != null && c.copy !== ((A.settings && A.settings.inviteCopy) || '')))) return 'reinvite';
     return 'sent';
   }
+  const PENDING = ['new', 'changed', 'email', 'retry', 'reinvite'];   // confirming sends something
+  const EMAILS = ['new', 'changed', 'email', 'retry'];               // ...including an email
   function statusText(st, it) {
     const c = confirmedItems().find((x) => x.id === it.id) || {};
-    if (st === 'sent') return c.invitedAt ? '✓ Emailed and invited' : '✓ Emailed';
+    if (st === 'sent') return c.eventId ? '✓ Emailed and invited' : '✓ Emailed';
     if (st === 'unsent') return 'Not emailed (no email address)';
-    if (st === 'changed') return invitesOn() ? 'Moved · will email and update the invitation' : 'Moved · will email the new time';
-    if (st === 'invite') return 'Will send a calendar invitation';
+    if (st === 'retry') return 'Email failed · will try again';
+    if (st === 'email') return 'New email address · will send again';
+    if (st === 'reinvite') return c.inviteError ? 'Invitation update failed · will try again' : 'Will update the invitation';
+    if (st === 'changed') return c.eventId ? 'Moved · will email and update the invitation' : 'Moved · will email the new time';
     return '';
   }
-  // Confirmed meetings with a calendar invitation that are no longer on the schedule: cancelled on confirm.
-  const toCancel = () => confirmedItems().filter((c) => c.eventId && !(A.schedule && A.schedule.items.some((it) => it.id === c.id)));
+  // Students who were told a time (or invited) but are no longer on the schedule, plus cancellations that
+  // failed last time: confirming tells them it's cancelled.
+  function toCancel() {
+    const conf = (A.week && A.week.confirmed) || {};
+    const on = new Set(A.schedule ? A.schedule.items.map((it) => it.id) : []);
+    return (conf.items || []).concat(conf.cancelFailed || []).filter((c) => (c.eventId || c.sentAt) && !on.has(c.id));
+  }
 
   function clashNote(it) {
     const evs = eventsDuring(it.date, it.start, it.end);
@@ -444,9 +464,10 @@
   function scheduleSec() {
     const sc = A.schedule;
     const st = sc.items.map(statusOf);
-    const toSend = st.filter((x) => x === 'new' || x === 'changed' || x === 'invite').length;
+    const toSend = st.filter((x) => PENDING.includes(x)).length, emails = st.filter((x) => EMAILS.includes(x)).length;
     const cancels = toCancel();
     const isConfirmed = confirmedItems().length && !toSend && !cancels.length;
+    const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
     return '<div class="side-sec">' +
       '<div class="sec-head"><h3>' + (isConfirmed ? 'Confirmed schedule' : 'Schedule') + '</h3>' +
         '<span class="sec-actions"><button class="btn sm ghost icon" data-act="copy-schedule" title="Copy as text" aria-label="Copy as text">' + icon('copy') + '</button>' +
@@ -467,11 +488,14 @@
         ? '<div class="unfit"><b>Not scheduled</b><ul>' + sc.unfit.map((u) =>
             '<li>' + esc(u.name) + ' <span>(' + esc(u.reason) + ')</span> <button class="linkbtn" data-act="place" data-id="' + esc(u.id) + '">Place</button></li>').join('') + '</ul></div>'
         : '') +
-      (cancels.length ? '<p class="small" style="margin-top:10px;color:var(--warn)">Taken out: ' + cancels.map((c) => esc(c.name)).join(', ') + '. Their calendar invitation' + (cancels.length === 1 ? ' is' : 's are') + ' cancelled when you confirm.</p>' : '') +
+      (cancels.length ? '<p class="small" style="margin-top:10px;color:var(--warn)">Taken out: ' + cancels.map((c) => esc(c.name)).join(', ') + '. When you confirm, ' + (cancels.length === 1 ? 'they’re' : 'they’re each') + ' told the meeting is cancelled' + (cancels.some((c) => c.eventId) ? ' and the calendar invitation is cancelled' : '') + '.</p>' : '') +
       (sc.partial ? '<p class="muted small" style="margin-top:10px">Big group: this is the best arrangement found quickly, and a better one may exist.</p>' : '') +
-      '<button class="btn primary block" data-act="confirm" style="margin-top:14px"' + (toSend || cancels.length ? '' : ' disabled') + '>' +
-        (toSend ? icon('check') + 'Confirm & email ' + toSend + ' student' + (toSend === 1 ? '' : 's')
-          : cancels.length ? icon('check') + 'Cancel ' + cancels.length + ' invitation' + (cancels.length === 1 ? '' : 's') : sc.items.length ? 'Everyone has been emailed' : 'Nothing to send') + '</button>' +
+      '<button class="btn primary block" data-act="confirm" style="margin-top:14px"' + ((toSend || cancels.length) && !confirming ? '' : ' disabled') + '>' +
+        (confirming ? 'Sending…'
+          : emails ? icon('check') + 'Confirm & email ' + plural(emails, 'student', 'students')
+          : toSend ? icon('check') + 'Update ' + plural(toSend, 'invitation', 'invitations')
+          : cancels.length ? icon('check') + 'Send ' + plural(cancels.length, 'cancellation', 'cancellations')
+          : sc.items.length ? 'Everyone has been emailed' : 'Nothing to send') + '</button>' +
       '<p class="muted small" style="margin-top:8px">' + (invitesOn()
         ? 'Each student gets an email and a Google Calendar invitation' + (A.settings.inviteCopy ? ' (' + esc(A.settings.inviteCopy) + ' is invited too)' : '') + '. If you move someone later, only they get an update.'
         : 'Each student gets their time by email with a calendar file. If you move someone later, only they get an update.') + '</p>' +
@@ -500,7 +524,9 @@
       .map((x) => ({ id: x.id, name: rmap.get(x.id).name, date: x.date, start: x.start, end: x.end }));
     const placed = new Set(items.map((x) => x.id));
     const unfit = sortedResponses().filter((r) => !placed.has(r.id)).map((r) => ({ id: r.id, name: r.name, reason: 'not scheduled' }));
-    return finalizeSchedule(items, unfit, false);
+    const sc = finalizeSchedule(items, unfit, false);
+    sc.fromServer = true; // exactly what was confirmed; a suggestion or any edit makes a new one without this
+    return sc;
   }
 
   // Fit each student's requested length into times they marked, with no overlaps, placing as many as
@@ -691,27 +717,37 @@
   }
 
   // ── confirm & export ──
+  let confirming = false; // one confirm at a time (Enter right after the dialog would otherwise send twice)
   async function confirmSchedule() {
     const sc = A.schedule;
-    if (!sc) return; // an empty schedule can still have invitations to cancel
-    const toSend = sc.items.filter((it) => ['new', 'changed', 'invite'].includes(statusOf(it)));
+    if (!sc || confirming) return; // an empty schedule can still have cancellations to send
+    const toSend = sc.items.filter((it) => PENDING.includes(statusOf(it)));
     const cancels = toCancel();
     if (!toSend.length && !cancels.length) { M.toast('Everyone already has their current time.'); return; }
-    const tag = { changed: ' (moved)', invite: ' (invitation only, already emailed)' };
+    const tag = { changed: ' (moved)', email: ' (new email address)', retry: ' (email failed before)', reinvite: ' (invitation update only)' };
     const lines = toSend.map((it) => '• ' + it.name + ': ' + M.fmtDay(it.date) + ', ' + M.fmtRange(it.start, it.end) + (tag[statusOf(it)] || ''));
     const n = toSend.length, who = n + ' student' + (n === 1 ? '' : 's');
-    const head = !n ? 'Cancel these calendar invitations?'
-      : invitesOn() ? 'Email ' + who + ' their meeting time and send Google Calendar invitations?'
+    const head = !n ? 'Tell these students their meeting is cancelled?'
+      : invitesOn() ? 'Send ' + who + ' their meeting time (email and Google Calendar invitation)?'
       : 'Email ' + who + ' their meeting time?';
+    const cancelled = new Set(cancels.map((c) => c.id));
+    const unfit = sc.unfit.filter((u) => !cancelled.has(u.id));
     if (!confirm(head + (n ? '\n\n' + lines.join('\n') : '') +
-      (cancels.length ? '\n\nCancel calendar invitation: ' + cancels.map((c) => c.name).join(', ') : '') +
-      (sc.unfit.length ? '\n\nNot scheduled, no email: ' + sc.unfit.map((u) => u.name).join(', ') : ''))) return;
+      (cancels.length ? '\n\nCancelled: ' + cancels.map((c) => c.name).join(', ') : '') +
+      (unfit.length ? '\n\nNot scheduled, no email: ' + unfit.map((u) => u.name).join(', ') : ''))) return;
+    if (confirming) return;
     const id = A.weekId, seq = loadSeq;
     const items = sc.items.map((it) => ({ id: it.id, date: it.date, start: it.start, end: it.end, startUtc: utcOf(it.date, it.start), endUtc: utcOf(it.date, it.end) }));
+    const base = (A.week && A.week.confirmed && A.week.confirmed.at) || ''; // the server refuses if it has changed since
+    confirming = true;
     setBusy(true);
+    const btn = document.querySelector('[data-act="confirm"]');
+    if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
     try {
-      const res = await M.api.confirm(A.key, id, items);
-      if (!stillOn(id, seq)) return;
+      const res = await M.api.confirm(A.key, id, items, base);
+      confirming = false;
+      dropPrefetch();
+      if (!stillOn(id, seq)) { M.store.del(cacheKey(id)); return; }
       A.week = res.week;
       cacheNow();
       A.schedule = fromConfirmed();
@@ -722,7 +758,9 @@
       M.toast(M.DEMO ? 'Demo: confirmed (no emails in demo mode)' : done.length ? 'Sent ' + done.join(' · ') : 'Saved');
       if (res.skipped && res.skipped.length) alert('Needs a look:\n' + res.skipped.map((x) => '• ' + (x.name || '?') + ': ' + x.reason).join('\n'));
     } catch (e) {
+      confirming = false;
       setBusy(false);
+      if (stillOn(id, seq)) render();
       M.toast(e.message);
     }
   }
@@ -734,7 +772,7 @@
       const r = rmap.get(it.id) || {};
       return {
         uid: A.weekId + '-' + it.id + '-host', start: utcOf(it.date, it.start), end: utcOf(it.date, it.end),
-        title: it.name + ' / ' + (A.settings.name || 'Me'), // same title the student's invite has
+        title: it.name + ' / ' + (A.settings.name || 'Advisor'), // same title the student's invite has
         desc: ['Topic: ' + (r.topic || ''), 'Time needed: ' + M.fmtDuration(r.duration || 0), r.email ? 'Email: ' + r.email : ''].filter(Boolean).join('\n'),
       };
     });
@@ -764,8 +802,16 @@
       if (!stillOn(id, seq)) return;
       A.responses = d.responses || [];
       if (!A.dirty) { A.week = d.week; A.draft = makeDraft(d.week); }
+      A.settings = d.settings;
       A.focus = null; A.placing = null;
-      A.schedule = A.week && A.week.confirmed ? fromConfirmed() : null;
+      if (A.schedule && !A.schedule.fromServer) { // your suggestion or unsent edits: keep them
+        const rmap = respById(), placed = new Set();
+        const items = A.schedule.items.filter((it) => rmap.has(it.id)).map((it) => { placed.add(it.id); return { id: it.id, name: rmap.get(it.id).name, date: it.date, start: it.start, end: it.end }; });
+        const unfit = sortedResponses().filter((r) => !placed.has(r.id)).map((r) => (A.schedule.unfit.find((u) => u.id === r.id) || { id: r.id, name: r.name, reason: 'new response' }));
+        A.schedule = finalizeSchedule(items, unfit, A.schedule.partial);
+      } else {
+        A.schedule = A.week && A.week.confirmed ? fromConfirmed() : null;
+      }
       keepView();
       cacheNow();
       render();
@@ -782,12 +828,15 @@
     const week = A.weekId, seq = loadSeq;
     try {
       await M.api.deleteResponse(A.key, week, id);
+      dropPrefetch();
       if (!stillOn(week, seq)) { M.store.del(cacheKey(week)); return; }
       A.responses = A.responses.filter((x) => x.id !== id);
       if (A.focus === id) A.focus = null;
       if (A.schedule) { // take just them out; the rest of your schedule (and any unsent moves) stays
         const items = A.schedule.items.filter((it) => it.id !== id), unfit = A.schedule.unfit.filter((u) => u.id !== id);
-        A.schedule = items.length || unfit.length || confirmedItems().length ? finalizeSchedule(items, unfit, A.schedule.partial) : null;
+        const was = A.schedule;
+        A.schedule = items.length || unfit.length || confirmedItems().length ? finalizeSchedule(items, unfit, was.partial) : null;
+        if (A.schedule) A.schedule.fromServer = was.fromServer;
       }
       keepView();
       cacheNow();
@@ -799,9 +848,15 @@
   }
 
   // ───────────── events from your calendars (drawn as solid blocks on the grid) ─────────────
+  // Kept in memory only (never in the browser's storage); refetched after 10 minutes, like the server's copy.
+  let busyGen = 0; // bumped when calendar data is reset; replies from before that are ignored
+  const BUSY_TTL = 10 * 60 * 1000;
+  function resetBusy() { A.busy = {}; busyGen++; }
   async function loadBusy(id, fresh) {
-    if (M.DEMO || (A.busy[id] && (!fresh || A.busy[id].loading))) return;
-    A.busy[id] = { list: (A.busy[id] && A.busy[id].list) || [], errors: [], loading: true }; // old events stay up while refreshing
+    const cur = A.busy[id];
+    if (M.DEMO || (cur && !fresh && (cur.loading || Date.now() - (cur.at || 0) < BUSY_TTL))) return;
+    const gen = busyGen, req = ((cur && cur.req) || 0) + 1;
+    A.busy[id] = { list: (cur && cur.list) || [], errors: [], loading: true, req: req, at: (cur && cur.at) || 0 }; // old events stay up meanwhile
     let entry;
     try {
       const d = await M.api.busy(A.key, id, fresh); // the server keeps answers for 10 minutes unless fresh
@@ -810,6 +865,8 @@
       // An older backend without calendar support answers "Unknown action": just show nothing.
       entry = { list: [], errors: /unknown action/i.test(e.message) ? [] : [{ id: '', reason: e.message }] };
     }
+    if (gen !== busyGen || !A.busy[id] || A.busy[id].req !== req) return; // reset or superseded meanwhile
+    entry.req = req; entry.at = Date.now();
     A.busy[id] = entry;
     if (A.weekId !== id) return;
     if (A.tab === 'resp' && A.view === 'schedule' && A.schedule && !document.querySelector('.cal.grabbing')) { render(); return; } // list notes overlaps
@@ -949,7 +1006,7 @@
     const cal = host.firstChild;
     if (isAvail) {
       cal.querySelectorAll('.col').forEach(paintAvailCol);
-      if (!A.busy[A.weekId]) loadBusy(A.weekId); else renderBusyBlocks();
+      loadBusy(A.weekId); renderBusyBlocks();
       M.drag.attach(cal.querySelector('.cal-body'), {
         selector: '.cell',
         touch: !coarse,
@@ -965,7 +1022,7 @@
       paintResp(cal);
       attachTooltip(cal);
       if (A.view === 'schedule' && A.schedule) { cal.classList.add('sched'); attachMove(cal); }
-      if (!A.busy[A.weekId]) loadBusy(A.weekId); else renderBusyBlocks();
+      loadBusy(A.weekId); renderBusyBlocks();
     }
   }
 
@@ -1055,7 +1112,7 @@
         const not = A.responses.map((r) => r.name).filter((n) => !names.includes(n));
         if (names.length && not.length) html += '<br><span class="dim">Not: ' + not.map(esc).join(', ') + '</span>';
       }
-      const evs = eventsDuring(d, m, m + A.week.increment);
+      const evs = A.showCal ? eventsDuring(d, m, m + A.week.increment) : [];
       if (evs.length) html += '<br><span class="tip-ev">Your calendar: ' + evs.map((ev) => esc(ev.title || 'Busy')).join(', ') + '</span>';
       tip.innerHTML = html;
       tip.hidden = false;
@@ -1124,6 +1181,13 @@
         '</div>' +
       '</form>';
     document.body.appendChild(dlg);
+    // Checks run before the dialog closes, so a problem (or "no" to the time zone question) keeps your edits.
+    dlg.querySelector('form').addEventListener('submit', (e) => {
+      const f = e.target.elements;
+      if (M.toMin(f.namedItem('dayEnd').value) <= M.toMin(f.namedItem('dayStart').value)) { e.preventDefault(); M.toast('The calendar has to end after it starts.'); return; }
+      const tz = f.namedItem('timezone').value;
+      if (tz !== s.timezone && !confirm('Change your time zone to ' + M.tzLabel(tz) + '? Weeks you’ve already published keep their clock times, so students will see them shifted by the time difference.')) e.preventDefault();
+    });
     dlg.addEventListener('click', (e) => {
       const b = e.target.closest('[data-dact]');
       if (!b) return;
@@ -1147,12 +1211,11 @@
         weekends: f.namedItem('weekends').checked,
         ...(M.DEMO ? {} : { calendars: f.namedItem('calendars').value, notify: f.namedItem('notify').checked, notifyTo: f.namedItem('notifyTo').value, ...(f.namedItem('invites') ? { invites: f.namedItem('invites').checked, inviteCopy: f.namedItem('inviteCopy').value } : {}) }),
       };
-      if (M.toMin(next.dayEnd) <= M.toMin(next.dayStart)) { M.toast('The calendar has to end after it starts.'); return; }
-      if (next.timezone !== s.timezone && !confirm('Change your time zone to ' + M.tzLabel(next.timezone) + '? Weeks you’ve already published keep their clock times, so students will see them shifted by the time difference.')) return;
+      if (M.toMin(next.dayEnd) <= M.toMin(next.dayStart)) return; // already checked on submit
       try {
         const res = await M.api.saveSettings(A.key, next);
         A.settings = res.settings;
-        A.busy = {}; // calendars may have changed
+        resetBusy(); // calendars may have changed
         dropPrefetch();
         cacheNow();
         render();
@@ -1176,7 +1239,7 @@
     const inc = e.target.closest('[data-inc]');
     if (inc) { if (!inc.disabled) setIncrement(Number(inc.dataset.inc)); return; }
     const view = e.target.closest('[data-view]');
-    if (view) { if (!view.disabled) { A.view = view.dataset.view; A.focus = null; render(); } return; }
+    if (view) { if (!view.disabled) { A.view = view.dataset.view; A.focus = null; viewTouched = true; render(); } return; }
     const act = e.target.closest('[data-act]');
     if (act) { onAct(act.dataset.act, act, e); return; }
     if (e.target.closest('a')) return;

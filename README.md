@@ -54,7 +54,7 @@ Use a **personal Gmail account**. University-managed Google accounts often block
   4. If the site can't read a calendar, an orange note appears above the grid.
 - **Calendar refresh.** To keep week switching fast, the script remembers each week's events for 10 minutes. If you just added an event in Google Calendar, click **Refresh** at the right of the note above the grid.
 - **Email alerts.** Each new or updated response emails the Google account that owns the script, or the address under ⚙︎ Settings → *Send these alerts to*. The email has the student's name, time needed, topic, availability and a link to the Responses tab. Replying goes to the student if they gave an email. Turn alerts off in ⚙︎ Settings.
-- These features need the permissions listed in [`apps-script/appsscript.json`](apps-script/appsscript.json): this spreadsheet only, read-only calendar, send email as you, and your email address. To set them up, paste that file in the editor after turning on *Project Settings → Show "appsscript.json" manifest file*.
+- These features need the permissions listed in [`apps-script/appsscript.json`](apps-script/appsscript.json): this spreadsheet only, read your calendars, create calendar events (for invitations), send email as you, and your email address. To set them up, paste that file in the editor after turning on *Project Settings → Show "appsscript.json" manifest file*.
 
 ## Each week
 

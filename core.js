@@ -417,7 +417,7 @@
     submit: (weekId, response) => call('submit', { weekId: weekId, response: response }),
     adminLoad: (key, weekId) => call('adminLoad', { key: key, weekId: weekId, site: siteBase() }),
     getMine: (weekId, id) => call('getMine', { weekId: weekId, id: id }),
-    confirm: (key, weekId, items) => call('confirm', { key: key, weekId: weekId, items: items }),
+    confirm: (key, weekId, items, base) => call('confirm', { key: key, weekId: weekId, items: items, base: base || '' }),
     saveWeek: (key, week) => call('saveWeek', { key: key, week: week, site: siteBase() }),
     saveSettings: (key, settings) => call('saveSettings', { key: key, settings: settings, site: siteBase() }),
     busy: (key, weekId, fresh) => call('busy', { key: key, weekId: weekId, fresh: !!fresh }),
@@ -528,7 +528,19 @@
     events.forEach((e) => lines.push('BEGIN:VEVENT', 'UID:' + e.uid + '@meeting-signup', 'SEQUENCE:' + (e.seq || 0), 'DTSTAMP:' + stamp,
       'DTSTART:' + icsTime(e.start), 'DTEND:' + icsTime(e.end), 'SUMMARY:' + icsText(e.title), 'DESCRIPTION:' + icsText(e.desc || ''), 'END:VEVENT'));
     lines.push('END:VCALENDAR');
-    return lines.map((line) => { const out = []; while (line.length > 74) { out.push(line.slice(0, 74)); line = ' ' + line.slice(74); } out.push(line); return out.join('\r\n'); }).join('\r\n') + '\r\n';
+    return lines.map(icsFold).join('\r\n') + '\r\n';
+  }
+  // Lines of at most 75 bytes (UTF-8), never splitting a character; continuation lines start with a space.
+  function icsFold(line) {
+    const out = [];
+    let cur = '', n = 0;
+    for (const ch of line) {
+      const c = ch.codePointAt(0), b = c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+      if (n + b > 75) { out.push(cur); cur = ' '; n = 1; }
+      cur += ch; n += b;
+    }
+    out.push(cur);
+    return out.join('\r\n');
   }
   // ───────────── US federal holidays ─────────────
   // {'YYYY-MM-DD': name} for one year (5 U.S.C. 6103). A fixed-date holiday that falls on a

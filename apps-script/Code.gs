@@ -239,7 +239,10 @@ function busy_(req) {
     try { const hit = safeJson_(c.get(key), null); if (hit && hit.ok) return hit; } catch (e) { /* cache unavailable: fetch */ }
   }
   const out = busyFetch_(ids, weekId, s.timezone);
-  if (!out.errors.length) { try { c.put(key, JSON.stringify(out), BUSY_CACHE_SECONDS); } catch (e) { /* too big to cache: fine */ } }
+  try {
+    if (!out.errors.length) c.put(key, JSON.stringify(out), BUSY_CACHE_SECONDS);
+    else c.removeAll([key]); // don't keep serving an older answer
+  } catch (e) { /* too big to cache: fine */ }
   return out;
 }
 function hash_(text) { // short, stable cache-key fragment (not for security)
@@ -282,6 +285,7 @@ function busyFetch_(ids, weekId, tz) {
 function ownMeeting_(ev, mine) {
   const xp = ev.extendedProperties || {};
   if ((xp.private && xp.private.meetingSignup) || (xp.shared && xp.shared.meetingSignup)) return true;
+  if (/@meeting-signup$/i.test(String(ev.iCalUID || ''))) return true; // imported from this site's .ics
   const uid = String(ev.iCalUID || '').replace(/@google\.com$/, '');
   return !!(mine && (mine[ev.id] || mine[uid]));
 }
@@ -342,9 +346,9 @@ function receipt_(w, r, isUpdate) {
     const s = loadSettings_();
     const host = s.name || 'your advisor';
     const link = s.site ? s.site.replace(/\/?$/, '/') + '?week=' + w.id + '&r=' + encodeURIComponent(r.id) : '';
-    const tzn = Utilities.formatDate(new Date(), s.timezone, 'zzzz');
+    const tzn = Utilities.formatDate(new Date(parseYmd(w.id).getTime() + 12 * 3600e3), s.timezone, 'zzzz'); // as of that week
     const lines = [
-      'Hi ' + r.name.split(/\s+/)[0] + ',',
+      greeting_(r.name),
       '',
       (isUpdate ? 'Your updated availability' : 'Your availability') + ' for the week of ' + niceDate_(w.id) + ' was received' +
         (s.name ? ' by ' + s.name : '') + ':',
@@ -364,60 +368,115 @@ function receipt_(w, r, isUpdate) {
   }
 }
 
-// ───────────── confirm meetings: email each student their time with a calendar file ─────────────
+// ───────────── confirm meetings: email each student their time ─────────────
+// req.items is the whole schedule. Each meeting keeps the way it was first sent: a Google Calendar invitation
+// (eventId) or an emailed calendar file (.ics); switching later would leave a stale or duplicate entry on
+// the student's calendar. Students taken out since the last confirm are told the meeting is cancelled.
+const CONFIRM_LOCK_SECONDS = 300;
 function confirm_(req) {
   const weekId = String(req.weekId || '');
   if (!DATE_RE.test(weekId)) throw new Error('Invalid week.');
-  const w0 = readWeeks_()[weekId];
-  if (!w0) throw new Error('Publish this week first.');
+  if (!Array.isArray(req.items)) throw new Error('Nothing to confirm.');
+  const flag = 'confirming:' + weekId;
+  // One confirm per week at a time (a double click or a second tab would send everything twice), and only
+  // from a page that has seen the latest confirmed schedule (else it would cancel meetings it never knew of).
+  const w0 = withLock_(() => {
+    const c = CacheService.getScriptCache();
+    if (c.get(flag)) throw new Error('This week is already being confirmed. Wait a moment, then refresh.');
+    const w = readWeeks_()[weekId];
+    if (!w) throw new Error('Publish this week first.');
+    if (req.base !== undefined && String(req.base || '') !== String((w.confirmed && w.confirmed.at) || '')) {
+      throw new Error('This schedule was confirmed from another tab or device since you opened it. Refresh to see the latest, then confirm again.');
+    }
+    c.put(flag, '1', CONFIRM_LOCK_SECONDS);
+    return w;
+  });
+  try {
+    return confirmWeek_(weekId, w0, req.items);
+  } finally {
+    try { CacheService.getScriptCache().removeAll([flag]); } catch (e) { /* expires by itself */ }
+  }
+}
+function confirmWeek_(weekId, w0, reqItems) {
   const s = readSettings_();
-  const byId = {};
+  const now = () => new Date().toISOString();
+  const byId = Object.create(null);
   readResponses_(weekId).forEach((r) => { byId[r.id] = r; });
-  const prev = {};
-  ((w0.confirmed && w0.confirmed.items) || []).forEach((x) => { prev[x.id] = x; });
-  const items = [], emailed = [], invited = [], cancelled = [], skipped = [];
-  const cal = s.invites ? 'primary' : ''; // the script account's own calendar; '' = email only
-  (Array.isArray(req.items) ? req.items : []).slice(0, 300).forEach((it) => {
-    const rec = confirmItem_(it, byId[String(it && it.id)]);
-    if (!rec) { skipped.push({ name: (byId[String(it && it.id)] || {}).name || '', reason: 'response not found or invalid time' }); return; }
+  const conf = w0.confirmed || {};
+  const prev = Object.create(null); // last confirmed meetings, plus cancellations that failed last time
+  (conf.cancelFailed || []).forEach((x) => { prev[x.id] = x; });
+  (conf.items || []).forEach((x) => { prev[x.id] = x; });
+  const seqs = Object.assign(Object.create(null), conf.seqs || {}); // last .ics SEQUENCE per student, kept after removal
+  const cal = s.invites ? 'primary' : ''; // the script account's own calendar; '' = email + calendar file
+  const copy = s.inviteCopy || '';
+  const items = [], emailed = [], invited = [], cancelled = [], skipped = [], cancelFailed = [];
+  const seen = Object.create(null);
+  const why = (e) => String((e && e.message) || e).slice(0, 200);
+  reqItems.slice(0, 300).forEach((it) => {
+    const id = String(it && it.id);
+    if (seen[id]) return;
+    seen[id] = true;
+    const rec = confirmItem_(it, byId[id]);
+    if (!rec) {
+      skipped.push({ name: (byId[id] || prev[id] || {}).name || '', reason: 'response not found or invalid time' });
+      if (prev[id]) items.push(prev[id]); // keep what they were last told
+      return;
+    }
     const old = prev[rec.id];
-    const unchanged = old && old.date === rec.date && old.start === rec.start && old.end === rec.end;
-    rec.seq = old ? (unchanged ? (old.seq || 0) : (old.seq || 0) + 1) : 0;
-    rec.sentAt = unchanged ? (old.sentAt || '') : '';
+    const moved = !old || old.date !== rec.date || old.start !== rec.start || old.end !== rec.end;
+    const newEmail = !!old && String(old.email || '').toLowerCase() !== rec.email.toLowerCase();
+    const viaInvite = old && (old.eventId || old.sentAt) ? !!old.eventId : !!cal;
+    rec.seq = old ? (old.seq || 0) + (moved ? 1 : 0) : (seqs[rec.id] != null ? Number(seqs[rec.id]) + 1 : 0);
     rec.eventId = (old && old.eventId) || '';
     rec.eventCal = (old && old.eventCal) || '';
-    rec.invitedAt = unchanged && rec.eventCal === cal ? (old.invitedAt || '') : '';
+    rec.copy = old && old.copy != null ? old.copy : copy; // the extra address on the invitation
+    rec.invitedAt = (old && old.invitedAt) || '';
+    rec.inviteError = '';
+    rec.sentAt = old && !moved && !newEmail ? (old.sentAt || '') : '';
+    rec.mailError = '';
     if (!EMAIL_RE.test(rec.email)) {
       if (!rec.sentAt) skipped.push({ name: rec.name, reason: 'no email address' });
       items.push(rec);
       return;
     }
-    if (cal && !rec.invitedAt) { // calendar invitation first, so the email can mention it
-      try { rec.eventId = upsertInvite_(s, cal, weekId, rec); rec.eventCal = cal; rec.invitedAt = new Date().toISOString(); invited.push(rec.name); }
-      catch (e) { skipped.push({ name: rec.name, reason: 'calendar invitation failed: ' + ((e && e.message) || e) }); }
+    if (viaInvite && (moved || newEmail || !rec.eventId || rec.copy !== copy || (old && old.inviteError))) {
+      try { // the invitation first, so the email can say it's coming
+        const target = rec.eventCal || cal || 'primary';
+        rec.eventId = upsertInvite_(s, target, weekId, rec, copy);
+        rec.eventCal = target; rec.copy = copy; rec.invitedAt = now(); invited.push(rec.name);
+      } catch (e) {
+        if (rec.eventId) rec.inviteError = why(e); // the old invitation is still there: retried next time
+        skipped.push({ name: rec.name, reason: 'calendar invitation failed: ' + why(e) });
+      }
     }
     if (!rec.sentAt) {
-      try { sendConfirmation_(s, weekId, rec, !!old, !!rec.invitedAt); rec.sentAt = new Date().toISOString(); emailed.push(rec.name); }
-      catch (e) { skipped.push({ name: rec.name, reason: 'email failed: ' + ((e && e.message) || e) }); }
+      const toldOldTime = !!(old && old.sentAt) && moved && !newEmail;
+      try { sendConfirmation_(s, weekId, rec, toldOldTime, !!rec.eventId); rec.sentAt = now(); emailed.push(rec.name); }
+      catch (e) { rec.mailError = why(e); skipped.push({ name: rec.name, reason: 'email failed: ' + why(e) }); }
     }
     items.push(rec);
   });
-  // Taken out of the schedule since the last confirm: cancel their calendar invitation.
-  const kept = {};
-  items.forEach((x) => { kept[x.id] = true; });
+  // Taken out since the last confirm (or a cancellation that failed last time): cancel and tell them.
   Object.keys(prev).forEach((id) => {
+    if (seen[id]) return;
     const old = prev[id];
-    if (kept[id] || !old.eventId) return;
-    try { Calendar.Events.remove(old.eventCal || cal, old.eventId, { sendUpdates: 'all' }); cancelled.push(old.name); }
-    catch (e) {
-      const msg = String((e && e.message) || e);
-      if (/not found|deleted|404|410/i.test(msg)) cancelled.push(old.name); // already gone
-      else skipped.push({ name: old.name, reason: 'couldn’t cancel the calendar invitation (' + msg + '). Delete it in your calendar.' });
+    seqs[id] = Math.max(Number(seqs[id] != null ? seqs[id] : -1), (old.seq || 0) + 1); // the cancellation's SEQUENCE
+    let ok = true;
+    if (old.eventId) {
+      try { Calendar.Events.remove(old.eventCal || 'primary', old.eventId, { sendUpdates: 'all' }); }
+      catch (e) { if (!/not found|deleted|404|410/i.test(why(e))) { ok = false; skipped.push({ name: old.name, reason: 'couldn’t cancel the calendar invitation: ' + why(e) }); } }
     }
+    if (ok && old.sentAt && EMAIL_RE.test(old.email || '')) {
+      try { sendCancellation_(s, weekId, old, !!old.eventId); }
+      catch (e) { ok = false; skipped.push({ name: old.name, reason: 'cancellation email failed: ' + why(e) }); }
+    }
+    if (ok) { if (old.eventId || old.sentAt) cancelled.push(old.name); }
+    else cancelFailed.push(old); // retried on the next confirm
   });
+  items.forEach((x) => { seqs[x.id] = x.seq || 0; });
   const week = withLock_(() => {
     const cur = readWeeks_()[weekId] || w0;
-    cur.confirmed = { at: new Date().toISOString(), items: items };
+    cur.confirmed = { at: now(), items: items, seqs: seqs, cancelFailed: cancelFailed };
     writeWeekRow_(cur);
     forget_(['week:' + weekId, 'openIds']);
     return cur;
@@ -427,9 +486,9 @@ function confirm_(req) {
 
 // Google Calendar event on the script account's calendar with the student (and your other address, e.g.
 // BC) as guests. Google sends the invitations and, when the time changes, the updates.
-function inviteEvent_(s, weekId, rec) {
+function inviteEvent_(s, weekId, rec, copy) {
   const guests = [{ email: rec.email, displayName: rec.name }];
-  if (s.inviteCopy && s.inviteCopy.toLowerCase() !== rec.email.toLowerCase()) guests.push({ email: s.inviteCopy, responseStatus: 'accepted' });
+  if (copy && copy.toLowerCase() !== rec.email.toLowerCase()) guests.push({ email: copy, responseStatus: 'accepted' });
   const tag = { meetingSignup: weekId + '-' + rec.id };
   return {
     summary: rec.name + ' / ' + (s.name || 'Advisor'),
@@ -442,13 +501,13 @@ function inviteEvent_(s, weekId, rec) {
     extendedProperties: { private: tag, shared: tag }, // shared: also on the guests' copies, so busy_ can skip them
   };
 }
-function upsertInvite_(s, cal, weekId, rec) {
-  const ev = inviteEvent_(s, weekId, rec);
-  if (rec.eventId && rec.eventCal === cal) {
-    try { return Calendar.Events.patch(ev, cal, rec.eventId, { sendUpdates: 'all' }).id; }
-    catch (e) { /* deleted by hand: make a new one */ }
-  } else if (rec.eventId && rec.eventCal) {
-    try { Calendar.Events.remove(rec.eventCal, rec.eventId, { sendUpdates: 'all' }); } catch (e) { /* already gone */ }
+// Updates the existing invitation (Google tells the guests), or creates one. Only an invitation that's gone
+// (deleted by hand) is replaced; any other failure is thrown, so the old one is never orphaned.
+function upsertInvite_(s, cal, weekId, rec, copy) {
+  const ev = inviteEvent_(s, weekId, rec, copy);
+  if (rec.eventId) {
+    try { return Calendar.Events.patch(ev, rec.eventCal || cal, rec.eventId, { sendUpdates: 'all' }).id; }
+    catch (e) { if (!/not found|deleted|404|410/i.test(String((e && e.message) || e))) throw e; }
   }
   return Calendar.Events.insert(ev, cal, { sendUpdates: 'all' }).id;
 }
@@ -459,12 +518,17 @@ function confirmItem_(it, r) {
   if (!DATE_RE.test(date) || !(start >= 0 && end <= 1440 && end > start) || isNaN(a) || isNaN(b) || b <= a) return null;
   return { id: r.id, name: r.name, email: r.email, date: date, start: start, end: end, startUtc: a.toISOString(), endUtc: b.toISOString() };
 }
+// "Hi Ana," or just "Hi," when the first word of the name doesn't look like a name (e.g. a link).
+function greeting_(name) {
+  const first = String(name || '').trim().split(/\s+/)[0] || '';
+  return first.length <= 30 && /^[\p{L}\p{M}]+(?:['’\-][\p{L}\p{M}]+)*\.?$/u.test(first) ? 'Hi ' + first + ',' : 'Hi,';
+}
 function sendConfirmation_(s, weekId, rec, isUpdate, invited) {
   const host = s.name || 'your advisor';
   const when = niceDay_(rec.date) + ' · ' + range12_(rec.start, rec.end);
   const tzn = Utilities.formatDate(new Date(rec.startUtc), s.timezone, 'zzzz');
   const body = [
-    'Hi ' + rec.name.split(/\s+/)[0] + ',',
+    greeting_(rec.name),
     '',
     (isUpdate ? 'Your meeting time has changed. ' : '') + 'Your meeting with ' + host + ' is confirmed:',
     '    ' + when + ' (' + tzn + ')',
@@ -483,20 +547,47 @@ function sendConfirmation_(s, weekId, rec, isUpdate, invited) {
   }
   MailApp.sendEmail(mail);
 }
-function icsFor_(events) {
+function sendCancellation_(s, weekId, rec, invited) {
+  const host = s.name || 'your advisor';
+  const when = niceDay_(rec.date) + ' · ' + range12_(rec.start, rec.end);
+  const mail = {
+    to: rec.email,
+    subject: 'Meeting cancelled: ' + when,
+    body: [
+      greeting_(rec.name),
+      '',
+      'Your meeting with ' + host + ' on ' + when + ' is cancelled.',
+      invited ? 'The calendar invitation is cancelled too.' : 'The attached calendar file takes it off your calendar.',
+    ].join('\n'),
+    name: s.name || 'Meeting sign-up',
+  };
+  if (!invited) {
+    const ics = icsFor_([{ uid: weekId + '-' + rec.id, seq: (rec.seq || 0) + 1, start: rec.startUtc, end: rec.endUtc, title: rec.name + ' / ' + (s.name || 'Advisor'), desc: '', cancelled: true }], 'CANCEL');
+    mail.attachments = [Utilities.newBlob(ics, 'text/calendar', 'cancel.ics')];
+  }
+  MailApp.sendEmail(mail);
+}
+function icsFor_(events, method) {
   const stamp = icsTime_(new Date().toISOString());
-  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//meeting-signup//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH'];
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//meeting-signup//EN', 'CALSCALE:GREGORIAN', 'METHOD:' + (method || 'PUBLISH')];
   events.forEach((e) => lines.push('BEGIN:VEVENT', 'UID:' + e.uid + '@meeting-signup', 'SEQUENCE:' + (e.seq || 0), 'DTSTAMP:' + stamp,
-    'DTSTART:' + icsTime_(e.start), 'DTEND:' + icsTime_(e.end), 'SUMMARY:' + icsText_(e.title), 'DESCRIPTION:' + icsText_(e.desc || ''), 'END:VEVENT'));
+    'DTSTART:' + icsTime_(e.start), 'DTEND:' + icsTime_(e.end), 'SUMMARY:' + icsText_(e.title), 'DESCRIPTION:' + icsText_(e.desc || ''),
+    ...(e.cancelled ? ['STATUS:CANCELLED'] : []), 'END:VEVENT'));
   lines.push('END:VCALENDAR');
   return lines.map(icsFold_).join('\r\n') + '\r\n';
 }
 function icsTime_(iso) { return String(iso).replace(/\.\d{3}Z$/, 'Z').replace(/[-:]/g, ''); }
-function icsText_(t) { return String(t).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n'); }
+function icsText_(t) { return String(t).replace(/\\/g, '\\\\').replace(/;/g, '\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n'); }
+// Lines of at most 75 bytes (UTF-8), never splitting a character; continuation lines start with a space.
 function icsFold_(line) {
   const out = [];
-  while (line.length > 74) { out.push(line.slice(0, 74)); line = ' ' + line.slice(74); }
-  out.push(line);
+  let cur = '', n = 0;
+  for (const ch of line) {
+    const c = ch.codePointAt(0), b = c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+    if (n + b > 75) { out.push(cur); cur = ' '; n = 1; }
+    cur += ch; n += b;
+  }
+  out.push(cur);
   return out.join('\r\n');
 }
 const ampm_ = (m) => (Math.floor(m / 60) % 24 < 12 ? 'am' : 'pm');
