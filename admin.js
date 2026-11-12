@@ -88,7 +88,7 @@
     A.responses = d.responses || [];
     A.draft = makeDraft(d.week);
     A.dirty = false; A.focus = null; A.placing = null;
-    A.schedule = d.week && d.week.confirmed ? fromConfirmed() : null;
+    A.schedule = hasConfirmed(d.week) ? fromConfirmed() : null;
     // A week opens on its schedule if confirmed. The fresh copy can correct what an older cached copy
     // picked (e.g. confirmed on another device), unless you've switched views yourself meanwhile.
     if (viewFor !== id) { viewFor = id; viewFresh = false; viewTouched = false; A.view = A.schedule ? 'schedule' : 'heat'; }
@@ -330,7 +330,7 @@
       if (draftKey(A.draft) === sent) { A.draft = makeDraft(res.week); A.dirty = false; } // else keep edits made while saving
       A.settings.increment = res.week.increment;
       A.settings.minMinutes = res.week.minMinutes;
-      if (!A.schedule && A.week.confirmed) A.schedule = fromConfirmed(); // keep showing what students were told
+      if (!A.schedule && hasConfirmed(A.week)) A.schedule = fromConfirmed(); // keep showing what students were told
       cacheNow();
       render();
       if (first) {
@@ -421,6 +421,8 @@
   const needFor = (r) => Math.max(A.week.increment, Math.ceil((Number(r.duration) || 30) / A.week.increment) * A.week.increment);
   const respById = () => new Map(A.responses.map((r) => [r.id, r]));
   const confirmedItems = () => (A.week && A.week.confirmed && A.week.confirmed.items) || [];
+  // Confirmed = someone has a time (or a cancellation still to send); a week where everything was cancelled isn't.
+  function hasConfirmed(w) { const c = w && w.confirmed; return !!c && ((c.items || []).length > 0 || (c.cancelFailed || []).length > 0); }
   const utcOf = (d, m) => new Date(M.slotIn(M.slotKey(d, m), A.settings.timezone, A.settings.timezone).t).toISOString();
 
   // Status of one meeting compared with what students were last emailed.
@@ -810,7 +812,7 @@
         const unfit = sortedResponses().filter((r) => !placed.has(r.id)).map((r) => (A.schedule.unfit.find((u) => u.id === r.id) || { id: r.id, name: r.name, reason: 'new response' }));
         A.schedule = finalizeSchedule(items, unfit, A.schedule.partial);
       } else {
-        A.schedule = A.week && A.week.confirmed ? fromConfirmed() : null;
+        A.schedule = hasConfirmed(A.week) ? fromConfirmed() : null;
       }
       keepView();
       cacheNow();
