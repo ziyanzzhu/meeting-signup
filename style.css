@@ -14,9 +14,9 @@
   --accent: #c09a9a;        /* dusty rose */
   --accent-tint: #f1e2e0;
   --ring: rgba(135, 92, 94, 0.16);
-  --free-bg: #f1e2e0;       /* your free time on the grid */
-  --free-fg: #875c5e;
-  --free-bar: #c09a9a;
+  --free-bg: #e4ebdc;       /* your free time on the grid: pastel sage */
+  --free-fg: #5b6e52;
+  --free-bar: #a9bc9e;
   --heat: #a97a7b;          /* most students free */
   --busy: rgba(140, 127, 124, 0.2);
   --busy-bg: rgba(232, 222, 208, 0.9);
@@ -45,9 +45,9 @@
     --accent: #b88c8c;
     --accent-tint: rgba(192, 154, 154, 0.18);
     --ring: rgba(217, 179, 177, 0.18);
-    --free-bg: rgba(192, 154, 154, 0.2);
-    --free-fg: #f1d9d6;
-    --free-bar: #c09a9a;
+    --free-bg: rgba(150, 178, 140, 0.18);
+    --free-fg: #d3e2cb;
+    --free-bar: #93ab88;
     --heat: #c9a0a0;
     --busy: rgba(255, 240, 235, 0.08);
     --busy-bg: rgba(70, 62, 58, 0.9);
