@@ -306,8 +306,8 @@
         '<div class="field"><label for="f-email">Email</label>' +
           '<input class="input" id="f-email" name="email" type="email" autocomplete="email" maxlength="120" value="' + esc(f.email) + '">' +
           '<span class="help">You’ll get a confirmation with a link to change your times, and later your meeting time.</span></div>' +
-        '<div class="field"><label for="f-topic">What would you like to talk about this week?</label>' +
-          '<textarea class="input" id="f-topic" name="topic" rows="5" maxlength="4000" placeholder="Progress since last time, results to look at, questions, anything you’re stuck on…">' + esc(f.topic) + '</textarea></div>' +
+        '<div class="field"><label for="f-topic">What would you like to talk about?</label>' +
+          '<textarea class="input" id="f-topic" name="topic" rows="5" maxlength="4000" placeholder="Specific results you want to share, questions, anything you are stuck at?">' + esc(f.topic) + '</textarea></div>' +
         '<div class="field"><span class="label" id="dur-l">How much time do you think you need?</span>' +
           '<div class="seg" id="f-dur" role="radiogroup" aria-labelledby="dur-l">' +
             opts.map((m) => '<button type="button" role="radio" data-dur="' + m + '" aria-checked="' + (f.duration === m) + '">' + M.fmtDuration(m) + '</button>').join('') +
