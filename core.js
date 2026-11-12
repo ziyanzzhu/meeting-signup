@@ -90,6 +90,12 @@
       return p ? p.value : tz;
     } catch (e) { return tz; }
   }
+  function tzShort(tz) { // e.g. "EST"
+    try {
+      const p = new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'short' }).formatToParts(new Date()).find((x) => x.type === 'timeZoneName');
+      return p ? p.value : '';
+    } catch (e) { return ''; }
+  }
   function browserTz() { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) { return ''; } }
 
   // ───────────── time-zone conversion (for showing students their own local time) ─────────────
@@ -491,7 +497,7 @@
   window.Meet = {
     DEMO, api, store, drag, icon, toast, copyText, esc, newId, uniq, demoAddSamples,
     pad, parseYmd, fmtYmd, addDays, dow, mondayOf, localToday, todayIn, toMin, fromMin, slotKey, splitKey,
-    DOW, DOW_LONG, MON, fmtTime, fmtHour, fmtRange, fmtDay, fmtWeekRange, fmtDateSpan, fmtDuration, fmtStamp, tzLabel, browserTz, initials,
+    DOW, DOW_LONG, MON, fmtTime, fmtHour, fmtRange, fmtDay, fmtWeekRange, fmtDateSpan, fmtDuration, fmtStamp, tzLabel, tzShort, browserTz, initials,
     slotIn,
     toRanges, convertSlots, durationOptions,
     DEFAULT_SETTINGS, normalizeSettings, normalizeWeek, normalizeResponse,

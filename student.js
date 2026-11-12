@@ -5,7 +5,10 @@
   const { esc, icon } = M;
   const app = document.getElementById('app');
   const qs = new URLSearchParams(location.search);
-  const CACHE_KEY = 'meet-cache-' + (qs.get('week') || 'current');
+  const rawWeek = qs.get('week');
+  const weekParam = rawWeek && /^\d{4}-\d{2}-\d{2}$/.test(rawWeek) ? M.mondayOf(rawWeek) : (rawWeek || null);
+  const CACHE_KEY = 'meet-cache-' + (weekParam || 'current');
+  const touchScreen = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
 
   const S = {
     step: 'loading',          // loading | select | details | done | none | closed | error
@@ -28,14 +31,14 @@
     if (cached) apply(cached);
     render();
     try {
-      const d = await M.api.getWeek(qs.get('week'));
+      const d = await M.api.getWeek(weekParam);
       if (!M.DEMO) M.store.set(CACHE_KEY, d);
       if (cached && JSON.stringify(cached) === JSON.stringify(d)) return;
       const before = S.step + '|' + (S.week && S.week.id);
       const rerouted = apply(d);
       const after = S.step + '|' + (S.week && S.week.id);
       // Don't redraw under a student who is typing, unless the week itself changed.
-      if (!cached || rerouted || before !== after || S.step === 'select' || S.step === 'none' || S.step === 'closed') render();
+      if (!cached || rerouted || before !== after || S.step !== 'details') render();
     } catch (e) {
       if (cached) return; // keep showing the saved copy
       S.step = 'error';
@@ -135,8 +138,8 @@
       title = 'Sign-ups are closed';
       body = 'Sign-ups for the week of ' + esc(M.fmtWeekRange(S.week.id)) + ' are closed. Watch for next week’s link.';
     } else if (S.step === 'none') {
-      title = qs.get('week') ? 'This link isn’t active' : 'No sign-up is open right now';
-      body = qs.get('week') ? 'There’s no sign-up for this week yet. Check that you have the latest link.' : 'Check back when you get this week’s link.';
+      title = weekParam ? 'This link isn’t active' : 'No sign-up is open right now';
+      body = weekParam ? 'There’s no sign-up for this week yet. Check that you have the latest link.' : 'Check back when you get this week’s link.';
     } else {
       title = 'Something went wrong';
       body = esc(S.error) + '<br><br><button class="btn" onclick="location.reload()">Try again</button>';
@@ -195,7 +198,7 @@
     const days = Array.from(byDay.keys()).sort();
     const need = needSlots();
     const intro = 'Choose at least <b>' + need + ' slot' + (need === 1 ? '' : 's') + '</b> and as many as possible. ' +
-      'Click and drag to select several at once.';
+      (touchScreen ? 'Tap the times that work for you, or tap a day to select all of it.' : 'Click and drag to select several at once.');
 
     if (!days.length) {
       return '<div class="main-head"><h2>No times posted yet</h2><p class="muted">Check back soon.</p></div>';
@@ -274,7 +277,7 @@
         '<div class="field"><label for="f-topic">What would you like to talk about this week?</label>' +
           '<textarea class="input" id="f-topic" name="topic" rows="5" maxlength="4000" placeholder="Progress since last time, results to look at, questions, anything you’re stuck on…">' + esc(f.topic) + '</textarea></div>' +
         '<div class="field"><span class="label" id="dur-l">How much time do you think you need?</span>' +
-          '<div class="seg" role="radiogroup" aria-labelledby="dur-l">' +
+          '<div class="seg" id="f-dur" role="radiogroup" aria-labelledby="dur-l">' +
             opts.map((m) => '<button type="button" role="radio" data-dur="' + m + '" aria-checked="' + (f.duration === m) + '">' + M.fmtDuration(m) + '</button>').join('') +
           '</div></div>' +
         (S.formError ? '<div class="error" role="alert">' + esc(S.formError) + '</div>' : '') +
@@ -287,7 +290,7 @@
 
   function bindDetails() {
     const form = document.getElementById('details');
-    form.addEventListener('input', readForm);
+    form.addEventListener('input', () => { readForm(); clearError(); });
     form.addEventListener('submit', (e) => { e.preventDefault(); submit(); });
     if (!S.form.name) document.getElementById('f-name').focus();
   }
@@ -303,10 +306,10 @@
   async function submit() {
     readForm();
     const f = S.form;
-    if (!f.name.trim()) return fail('Please enter your name.');
-    if (!f.topic.trim()) return fail('Please say what you would like to talk about.');
-    if (!f.duration || !M.durationOptions(inc()).includes(f.duration)) return fail('Please choose how much time you think you need.');
-    if (f.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.email.trim())) return fail('That email address doesn’t look right.');
+    if (!f.name.trim()) return fail('Please enter your name.', 'f-name');
+    if (!f.topic.trim()) return fail('Please say what you would like to talk about.', 'f-topic');
+    if (!f.duration || !M.durationOptions(inc()).includes(f.duration)) return fail('Please choose how much time you think you need.', 'f-dur');
+    if (f.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.email.trim())) return fail('That email address doesn’t look right.', 'f-email');
     S.busy = true; S.formError = ''; render();
     try {
       let id = (S.saved && S.saved.id) || M.store.get('meet-id');
@@ -327,11 +330,19 @@
     render();
   }
 
-  function fail(msg) {
+  function fail(msg, fieldId) {
     S.formError = msg;
     render();
     const err = app.querySelector('.error');
     if (err) err.scrollIntoView({ block: 'nearest' });
+    const field = fieldId && document.getElementById(fieldId);
+    if (field) (field.matches('.seg') ? field.querySelector('button') : field).focus();
+  }
+  function clearError() {
+    if (!S.formError) return;
+    S.formError = '';
+    const err = app.querySelector('.error');
+    if (err) err.remove();
   }
 
   // ───────────── step 3: done ─────────────
@@ -362,6 +373,7 @@
     if (t.dataset.day) return toggleDay(t.dataset.day);
     if (t.dataset.dur) {
       S.form.duration = Number(t.dataset.dur);
+      clearError();
       t.parentElement.querySelectorAll('button').forEach((b) => b.setAttribute('aria-checked', b === t));
       return;
     }

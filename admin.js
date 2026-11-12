@@ -22,6 +22,7 @@
     busy: {},          // weekId -> { list: [{start, end}], errors, set, inc } from your calendars
   };
 
+  const coarse = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches); // phones/tablets: tap, don't drag
   let loadSeq = 0; // ignores slow replies for a week you've already navigated away from
   const cacheKey = (id) => 'meet-admin-cache-' + id;
 
@@ -216,13 +217,13 @@
               (locked && d.increment !== n ? ' disabled title="Students already responded using ' + d.increment + '-min slots"' : '') +
               '>' + n + ' min</button>').join('') +
           '</div>' +
-          '<span class="hint muted">Click and drag to mark when you’re free</span>' +
-          '<span class="busy-legend' + (busyErrors().length ? ' warn' : '') + '" id="busy-legend">' + busyLegend() + '</span>' +
+          '<span class="hint muted">' + (coarse ? 'Tap to mark when you’re free' : 'Click and drag to mark when you’re free') + '</span>' +
           '<span class="spacer"></span>' +
           '<button class="btn sm ghost" data-act="copy-last">' + icon('copy') + 'Copy last week</button>' +
           '<button class="btn sm ghost" data-act="clear">Clear</button>' +
           '<button class="btn sm primary" data-act="save" id="save"' + (A.week && !A.dirty ? ' disabled' : '') + '>' + (A.week ? 'Save' : 'Publish') + '</button>' +
         '</div>' +
+        '<div class="busy-legend' + (busyErrors().length ? ' warn' : '') + '" id="busy-legend">' + busyLegend() + '</div>' +
         '<div id="grid"></div>' +
       '</section>' +
       '<aside class="panel side">' +
@@ -238,7 +239,7 @@
         '</div>' +
         '<div class="side-sec"><h3><label for="minsel">Minimum per student</label></h3>' +
           '<select class="input" id="minsel" data-field="minMinutes">' +
-            mins.map((m) => '<option value="' + m + '"' + (m === d.minMinutes ? ' selected' : '') + '>' + Math.ceil(m / d.increment) + ' slots (' + M.fmtDuration(m) + ')</option>').join('') +
+            mins.map((m) => '<option value="' + m + '"' + (m === d.minMinutes ? ' selected' : '') + '>' + Math.ceil(m / d.increment) + (Math.ceil(m / d.increment) === 1 ? ' slot (' : ' slots (') + M.fmtDuration(m) + ')</option>').join('') +
           '</select>' +
           '<p class="muted small" id="minhint" style="margin-top:6px">' + minHint() + '</p>' +
         '</div>' +
@@ -462,7 +463,7 @@
 
   function scheduleText() {
     const sc = A.schedule;
-    const lines = [A.settings.title + ' · ' + M.fmtWeekRange(A.weekId), ''];
+    const lines = [A.settings.title + ' · ' + M.fmtWeekRange(A.weekId) + ' (' + M.tzLabel(A.settings.timezone) + ')', ''];
     sc.items.forEach((it) => lines.push(M.fmtDay(it.date) + '  ' + M.fmtRange(it.start, it.end) + '  ' + it.name));
     if (sc.unfit.length) lines.push('', 'Not scheduled: ' + sc.unfit.map((u) => u.name).join(', '));
     return lines.join('\n');
@@ -585,7 +586,7 @@
     const range = gridRange(slots, inc);
     const today = M.localToday();
     let h = '<div class="cal' + (isAvail ? ' paint' : '') + (inc === 15 ? ' small' : '') + '" style="--days:' + days.length + ';--rh:' + (inc === 15 ? 13 : 24) + 'px">';
-    h += '<div class="cal-head"><div></div>' + days.map((d) =>
+    h += '<div class="cal-head"><div class="tzc" title="Times in ' + esc(M.tzLabel(A.settings.timezone)) + '">' + esc(M.tzShort(A.settings.timezone)) + '</div>' + days.map((d) =>
       '<div class="dh' + (d === today ? ' today' : '') + '">' + M.DOW[M.dow(d)] + '<b>' + Number(d.slice(8)) + '</b></div>').join('') + '</div>';
     h += '<div class="cal-body"><div class="tcol">';
     for (let m = range[0]; m < range[1]; m += inc) h += '<div class="t">' + (m % 60 === 0 ? '<span>' + M.fmtHour(m) + '</span>' : '') + '</div>';
@@ -606,7 +607,7 @@
       if (!A.busy[A.weekId]) loadBusy(A.weekId);
       M.drag.attach(cal.querySelector('.cal-body'), {
         selector: '.cell',
-        touch: true,
+        touch: !coarse,
         isOn: (el) => A.draft.slots.has(el.dataset.k),
         set: (el, on) => {
           A.dirty = true;
@@ -747,6 +748,7 @@
             (tzs.length
               ? '<select class="input" id="s-tz" name="timezone">' + tzs.map((z) => '<option' + (z === s.timezone ? ' selected' : '') + '>' + esc(z) + '</option>').join('') + '</select>'
               : '<input class="input" id="s-tz" name="timezone" value="' + esc(s.timezone) + '">') +
+            '<span class="help">Your times are set in this zone; students see them converted to their own. Changing it keeps the clock times of weeks you’ve already published, so students would see those weeks shifted.</span>' +
           '</div>' +
           '<div class="row2">' +
             '<div class="field"><label for="s-start">Calendar starts</label><select class="input" id="s-start" name="dayStart">' + hourOpts(s.dayStart, 0, 23) + '</select></div>' +
@@ -791,6 +793,7 @@
         ...(M.DEMO ? {} : { calendars: f.namedItem('calendars').value, notify: f.namedItem('notify').checked }),
       };
       if (M.toMin(next.dayEnd) <= M.toMin(next.dayStart)) { M.toast('The calendar has to end after it starts.'); return; }
+      if (next.timezone !== s.timezone && !confirm('Change your time zone to ' + M.tzLabel(next.timezone) + '? Weeks you’ve already published keep their clock times, so students will see them shifted by the time difference.')) return;
       try {
         const res = await M.api.saveSettings(A.key, next);
         A.settings = res.settings;
