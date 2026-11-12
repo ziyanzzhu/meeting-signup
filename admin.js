@@ -88,18 +88,47 @@
     syncUrl();
   }
 
+  // The weeks before and after the one on screen are fetched in the background, so the arrows
+  // open them instantly. A prefetch is used once, within a minute; saving anything drops them all.
+  let prefetched = {};
+  const loadedAt = {};
+  function dropPrefetch() { prefetched = {}; }
+  function prefetch(id) {
+    if (M.DEMO || prefetched[id] || id === A.weekId || Date.now() - (loadedAt[id] || 0) < 60000) return;
+    const entry = { at: Date.now() };
+    entry.p = M.api.adminLoad(A.key, id).then((d) => {
+      if (prefetched[id] === entry) M.store.set(cacheKey(id), d);
+      return d;
+    });
+    entry.p.catch(() => { if (prefetched[id] === entry) delete prefetched[id]; });
+    prefetched[id] = entry;
+    loadBusy(id);
+  }
+  function takePrefetch(id) {
+    const e = prefetched[id];
+    delete prefetched[id];
+    return e && Date.now() - e.at < 60000 ? e.p : null;
+  }
+  function prefetchAround(id) {
+    if (M.DEMO) return;
+    setTimeout(() => { if (A.weekId === id) { prefetch(M.addDays(id, 7)); prefetch(M.addDays(id, -7)); } }, 300);
+  }
+
   async function load(id) {
     const seq = ++loadSeq;
     const first = !A.settings;
     const trusted = M.DEMO || M.store.get('meet-admin-key') === A.key; // key already verified here
+    if (trusted) loadBusy(id); // your calendar, in parallel with the week itself
     const cached = M.DEMO || !trusted ? null : M.store.get(cacheKey(id));
     if (cached) { applyLoaded(id, cached); render(); }
     else if (first) root.innerHTML = '<div class="center"><div class="spinner" aria-label="Loading"></div></div>';
     else setBusy(true);
     try {
-      const d = await M.api.adminLoad(A.key, id);
+      const d = await (takePrefetch(id) || M.api.adminLoad(A.key, id));
       if (seq !== loadSeq) return; // a newer week was opened meanwhile
       if (!M.DEMO) { M.store.set('meet-admin-key', A.key); M.store.set(cacheKey(id), d); }
+      loadedAt[id] = Date.now();
+      prefetchAround(id);
       if (cached && JSON.stringify(cached) === JSON.stringify(d)) return;
       const lockedInc = (d.responses || []).length && d.week && A.draft && A.draft.increment !== d.week.increment;
       if (cached && A.dirty && !lockedInc) {
@@ -115,6 +144,7 @@
       if (seq !== loadSeq) return;
       if (/admin key/i.test(e.message)) {
         A.key = ''; M.store.del('meet-admin-key'); clearAdminCache();
+        A.busy = {}; dropPrefetch();
         renderLogin(e.message);
       } else if (cached) {
         M.toast('Showing saved data. Couldn’t refresh: ' + e.message);
@@ -283,6 +313,7 @@
       const res = await M.api.saveWeek(A.key, {
         id: id, increment: d.increment, minMinutes: d.minMinutes, slots: Array.from(d.slots), open: d.open, note: d.note,
       });
+      dropPrefetch(); // other weeks' prefetched copies carry the old defaults
       if (!stillOn(id, seq)) { M.store.del(cacheKey(id)); M.toast('Saved ' + M.fmtWeekRange(id)); return; }
       A.week = res.week;
       if (draftKey(A.draft) === sent) { A.draft = makeDraft(res.week); A.dirty = false; } // else keep edits made while saving
@@ -1052,6 +1083,7 @@
         const res = await M.api.saveSettings(A.key, next);
         A.settings = res.settings;
         A.busy = {}; // calendars may have changed
+        dropPrefetch();
         cacheNow();
         render();
         M.toast('Settings saved');
