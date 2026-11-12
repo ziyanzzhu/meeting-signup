@@ -4,7 +4,8 @@
   const M = window.Meet;
   const { esc, icon } = M;
   const root = document.getElementById('app');
-  const COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#84cc16', '#f97316'];
+  // Muted, earthy meeting colors (white text stays readable on each).
+  const COLORS = ['#a06e6e', '#6e8569', '#6e7f91', '#9c7c48', '#8a6d8b', '#7c7850', '#93604f', '#5f7e7c', '#8a7563', '#a07888'];
 
   const A = {
     key: M.DEMO ? 'demo' : (M.store.get('meet-admin-key') || ''),
@@ -200,17 +201,12 @@
     const n = Math.max(1, Math.ceil(d.minMinutes / d.increment));
     return 'Students see: “Choose at least ' + n + ' slot' + (n === 1 ? '' : 's') + ' and as many as possible.”';
   }
-  function offeredStats() {
-    const s = Array.from(A.draft.slots);
-    return { total: M.fmtDuration(s.length * A.draft.increment), days: new Set(s.map((k) => k.slice(0, 10))).size };
-  }
 
   function availView() {
     const d = A.draft;
     const locked = A.responses.length > 0;
     const mins = [30, 45, 60, 75, 90, 120, 150, 180].filter((m) => m % d.increment === 0);
     if (!mins.includes(d.minMinutes)) { mins.push(d.minMinutes); mins.sort((a, b) => a - b); }
-    const st = offeredStats();
     return '<div class="layout">' +
       '<section class="panel">' +
         '<div class="toolbar">' +
@@ -248,10 +244,6 @@
         '<div class="side-sec"><h3><label for="note">Note to students</label><span class="opt">optional</span></h3>' +
           '<textarea class="input" id="note" data-field="note" rows="3" maxlength="1000" placeholder="e.g. I’m traveling Thursday, so times are tight this week.">' + esc(d.note) + '</textarea>' +
         '</div>' +
-        '<div class="side-sec stats">' +
-          '<div class="stat"><b id="st-total">' + st.total + '</b><span>offered</span></div>' +
-          '<div class="stat"><b id="st-days">' + st.days + '</b><span>day' + (st.days === 1 ? '' : 's') + '</span></div>' +
-        '</div>' +
       '</aside>' +
     '</div>';
   }
@@ -264,12 +256,6 @@
     if (el) { el.className = 'status ' + st.cls; el.innerHTML = '<span class="dot"></span>' + st.text; }
     const sv = document.getElementById('save');
     if (sv) sv.disabled = false;
-  }
-  function updateStats() {
-    const st = offeredStats();
-    const t = document.getElementById('st-total'), d = document.getElementById('st-days');
-    if (t) t.textContent = st.total;
-    if (d) { d.textContent = st.days; d.nextElementSibling.textContent = st.days === 1 ? 'day' : 'days'; }
   }
 
   function setIncrement(n) {
@@ -817,7 +803,7 @@
       return icon('calendar') + '<span title="' + esc(msg) + '">' + esc(msg.length > 90 ? msg.slice(0, 90) + '…' : msg) + '</span>';
     }
     if (!b.list.length) return '';
-    return '<span class="sw"></span>Gray blocks are events on your calendar. A red edge means one overlaps time you’re offering.';
+    return '<span class="sw"></span>Shaded blocks are events on your calendar. A red edge means one overlaps time you’re offering.';
   }
 
   // ───────────── week grid ─────────────
@@ -835,6 +821,12 @@
     return [s, Math.min(e, 1440)];
   }
 
+  function dayHead(d, today) {
+    const hol = M.holiday(d);
+    return '<div class="dh' + (d === today ? ' today' : '') + (hol ? ' hol" title="' + esc(hol) + ' (US federal holiday)' : '') + '">' +
+      M.DOW[M.dow(d)] + '<b>' + Number(d.slice(8)) + '</b>' + (hol ? '<span class="hol-tag">' + esc(hol) + '</span>' : '') + '</div>';
+  }
+
   function mountGrid() {
     const host = document.getElementById('grid');
     if (!host) return;
@@ -847,12 +839,12 @@
     let h = '<div class="cal' + (isAvail ? ' paint' : '') + (inc === 15 ? ' small' : '') + '" data-start="' + range[0] + '" data-end="' + range[1] +
       '" data-inc="' + inc + '" data-rh="' + (inc === 15 ? 13 : 24) + '" style="--days:' + days.length + ';--rh:' + (inc === 15 ? 13 : 24) + 'px">';
     h += '<div class="cal-head"><div class="tzc" title="Times in ' + esc(M.tzLabel(A.settings.timezone)) + '">' + esc(M.tzShort(A.settings.timezone)) + '</div>' + days.map((d) =>
-      '<div class="dh' + (d === today ? ' today' : '') + '">' + M.DOW[M.dow(d)] + '<b>' + Number(d.slice(8)) + '</b></div>').join('') + '</div>';
+      dayHead(d, today)).join('') + '</div>';
     h += '<div class="cal-body"><div class="tcol">';
     for (let m = range[0]; m < range[1]; m += inc) h += '<div class="t">' + (m % 60 === 0 ? '<span>' + M.fmtHour(m) + '</span>' : '') + '</div>';
     h += '</div>';
     days.forEach((d) => {
-      h += '<div class="col" data-date="' + d + '">';
+      h += '<div class="col' + (M.holiday(d) ? ' hol' : '') + '" data-date="' + d + '">';
       for (let m = range[0]; m < range[1]; m += inc) {
         h += '<div class="cell' + (m % 60 === 0 ? ' h' : m % 30 === 0 ? ' hh' : '') + '" data-k="' + M.slotKey(d, m) + '"></div>';
       }
@@ -874,7 +866,7 @@
           if (on) A.draft.slots.add(el.dataset.k); else A.draft.slots.delete(el.dataset.k);
         },
         after: () => { cal.querySelectorAll('.col').forEach(paintAvailCol); updateBusyConflicts(); },
-        onEnd: () => { markDirty(); updateStats(); },
+        onEnd: () => markDirty(),
       });
     } else {
       paintResp(cal);

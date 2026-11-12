@@ -528,6 +528,45 @@
     lines.push('END:VCALENDAR');
     return lines.map((line) => { const out = []; while (line.length > 74) { out.push(line.slice(0, 74)); line = ' ' + line.slice(74); } out.push(line); return out.join('\r\n'); }).join('\r\n') + '\r\n';
   }
+  // ───────────── US federal holidays ─────────────
+  // {'YYYY-MM-DD': name} for one year (5 U.S.C. 6103). A fixed-date holiday that falls on a
+  // weekend is also marked on the weekday it is observed (Saturday → Friday, Sunday → Monday).
+  function usHolidays(year) {
+    const out = {};
+    const ymd = (m, d) => year + '-' + pad(m) + '-' + pad(d);
+    const nth = (m, wd, n) => { // n-th weekday wd (0 = Sun) of month m; n = -1 → the last one
+      if (n > 0) return ymd(m, 1 + ((wd - dow(ymd(m, 1)) + 7) % 7) + 7 * (n - 1));
+      const last = new Date(Date.UTC(year, m, 0)).getUTCDate();
+      return ymd(m, last - ((dow(ymd(m, last)) - wd + 7) % 7));
+    };
+    const fixed = (m, d, name) => {
+      const k = ymd(m, d), w = dow(k);
+      out[k] = name;
+      if (w === 6) out[addDays(k, -1)] = name + ' (observed)';
+      if (w === 0) out[addDays(k, 1)] = name + ' (observed)';
+    };
+    fixed(1, 1, "New Year's Day");
+    out[nth(1, 1, 3)] = 'MLK Day';
+    out[nth(2, 1, 3)] = "Presidents' Day";
+    out[nth(5, 1, -1)] = 'Memorial Day';
+    fixed(6, 19, 'Juneteenth');
+    fixed(7, 4, 'Independence Day');
+    out[nth(9, 1, 1)] = 'Labor Day';
+    out[nth(10, 1, 2)] = "Columbus / Indigenous Peoples' Day";
+    fixed(11, 11, 'Veterans Day');
+    out[nth(11, 4, 4)] = 'Thanksgiving';
+    fixed(12, 25, 'Christmas Day');
+    return out;
+  }
+  const holidayCache = {};
+  function holiday(date) { // '' when none; next year's list covers New Year's observed on Dec 31
+    const y = Number(String(date).slice(0, 4));
+    if (!y) return '';
+    const a = holidayCache[y] || (holidayCache[y] = usHolidays(y));
+    const b = holidayCache[y + 1] || (holidayCache[y + 1] = usHolidays(y + 1));
+    return a[date] || b[date] || '';
+  }
+
   function icsTime(iso) { return String(iso).replace(/\.\d{3}Z$/, 'Z').replace(/[-:]/g, ''); }
   function icsText(t) { return String(t).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n'); }
 
@@ -535,7 +574,7 @@
     DEMO, api, store, drag, icon, toast, copyText, esc, newId, uniq, demoAddSamples, ics,
     pad, parseYmd, fmtYmd, addDays, dow, mondayOf, localToday, todayIn, toMin, fromMin, slotKey, splitKey,
     DOW, DOW_LONG, MON, fmtTime, fmtHour, fmtRange, fmtDay, fmtWeekRange, fmtDateSpan, fmtDuration, fmtStamp, tzLabel, tzShort, browserTz, initials,
-    slotIn,
+    slotIn, holiday, usHolidays,
     toRanges, convertSlots, durationOptions,
     DEFAULT_SETTINGS, normalizeSettings, normalizeWeek, normalizeResponse,
   };
