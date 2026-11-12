@@ -403,7 +403,7 @@ function sendConfirmation_(s, weekId, rec, isUpdate) {
     '',
     'A calendar file is attached so you can add it to your calendar.',
   ].join('\n');
-  const ics = icsFor_([{ uid: weekId + '-' + rec.id, seq: rec.seq, start: rec.startUtc, end: rec.endUtc, title: 'Meeting with ' + host, desc: '' }]);
+  const ics = icsFor_([{ uid: weekId + '-' + rec.id, seq: rec.seq, start: rec.startUtc, end: rec.endUtc, title: rec.name + ' / ' + (s.name || 'Advisor'), desc: '' }]); // "Student / You"
   MailApp.sendEmail({
     to: rec.email,
     subject: (isUpdate ? 'Updated meeting time: ' : 'Meeting confirmed: ') + when,

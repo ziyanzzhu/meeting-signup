@@ -384,6 +384,20 @@ select.input { padding-right: 28px; }
 .bz.short .bz-t { font-size: 10.5px; line-height: 1.1; }
 .bz-time { display: block; color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
 .bz.conflict { background: color-mix(in srgb, var(--danger) 8%, var(--busy-bg)); box-shadow: inset 3px 0 0 var(--danger), inset 0 0 0 1px color-mix(in srgb, var(--danger) 55%, transparent); }
+/* your calendar over the Responses grid: see-through, so the heatmap and meetings show beneath */
+.cal:not(.paint) .bz {
+  z-index: 3; padding: 2px 3px; text-align: right;
+  background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--busy-bar) 30%, transparent) 0 2px, transparent 2px 7px);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--busy-bar) 85%, transparent);
+}
+.cal:not(.paint) .bz.short { justify-content: flex-end; padding: 0 3px; }
+.cal:not(.paint) .bz-t { display: inline-block; vertical-align: top; max-width: 64%; padding: 0 5px; border-radius: 4px; background: color-mix(in srgb, var(--surface) 90%, transparent); color: var(--muted); font-size: 10.5px; line-height: 1.5; }
+.cal:not(.paint) .bz.conflict { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--danger) 32%, transparent) 0 2px, transparent 2px 7px); box-shadow: inset 0 0 0 1.5px var(--danger); }
+.cal:not(.paint) .bz.conflict .bz-t { color: var(--danger); }
+.cal-toggle .sw-h { width: 14px; height: 11px; flex: none; border-radius: 3px; box-shadow: inset 0 0 0 1px var(--busy-bar); background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--busy-bar) 45%, transparent) 0 2px, transparent 2px 5px); }
+.cal-toggle[aria-pressed="false"] { color: var(--subtle); }
+.cal-toggle[aria-pressed="false"] .sw-h { background: none; opacity: 0.6; }
+.tip .tip-ev { color: color-mix(in srgb, var(--warn) 45%, var(--bg)); font-weight: 600; }
 .busy-legend { display: flex; align-items: center; gap: 6px; padding: 8px 14px 0; font-size: 12px; color: var(--muted); }
 .busy-legend:empty { display: none; }
 .busy-legend.warn { color: var(--warn); }

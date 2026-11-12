@@ -21,6 +21,7 @@
     schedule: null,    // { items, unfit, byCell }
     who: new Map(),    // slot -> names (for tooltips)
     busy: {},          // weekId -> { list: [{start, end}], errors, set, inc } from your calendars
+    showCal: M.store.get('meet-admin-showcal') !== false, // your calendar over the Responses grid
   };
 
   const coarse = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches); // phones/tablets: tap, don't drag
@@ -367,7 +368,8 @@
           '</div>' +
           (A.view === 'heat' && !A.focus ? '<span class="legend">fewer<span class="ramp"></span>more students</span>' : '') +
           '<span class="spacer"></span>' +
-          '<button class="btn sm ghost icon" data-act="refresh" aria-label="Refresh responses" title="Refresh responses">' + icon('refresh') + '</button>' +
+          (hasCalendars() ? '<button class="btn sm ghost cal-toggle" data-act="toggle-cal" aria-pressed="' + A.showCal + '" title="' + (A.showCal ? 'Hide' : 'Show') + ' your calendar events on the grid"><span class="sw-h"></span>My calendar</button>' : '') +
+          '<button class="btn sm ghost icon" data-act="refresh" aria-label="Refresh responses and calendar" title="Refresh responses and calendar">' + icon('refresh') + '</button>' +
           '<button class="btn sm primary" data-act="suggest"' + (n ? '' : ' disabled') + '>' + icon('sparkles') + (A.schedule ? 'Suggest again' : 'Suggest schedule') + '</button>' +
         '</div>' +
         '<div id="grid"></div>' +
@@ -419,6 +421,10 @@
   }
   const STATUS = { sent: '✓ Emailed', unsent: 'Not emailed (no email address)', changed: 'Moved · will email the new time', new: '' };
 
+  function clashNote(it) {
+    const evs = eventsDuring(it.date, it.start, it.end);
+    return evs.length ? '<span class="warn-t">Overlaps ' + evs.map((ev) => '“' + esc(ev.title || 'Busy') + '”').join(', ') + ' on your calendar</span>' : '';
+  }
   function scheduleSec() {
     const sc = A.schedule;
     const st = sc.items.map(statusOf);
@@ -436,6 +442,7 @@
             '<li><span class="cdot" style="--c:' + it.color + '"></span><div><b>' + esc(it.name) + '</b>' +
             '<span>' + esc(M.fmtDay(it.date)) + ' · ' + esc(M.fmtRange(it.start, it.end)) + '</span>' +
             (it.outside ? '<span class="warn-t">Outside the times they picked</span>' : '') +
+            clashNote(it) +
             (STATUS[st[i]] ? '<span class="st st-' + st[i] + '">' + STATUS[st[i]] + '</span>' : '') +
             '</div><button class="btn ghost icon x" data-act="unschedule" data-id="' + esc(it.id) + '" title="Take out of the schedule" aria-label="Take ' + esc(it.name) + ' out of the schedule">' + icon('x') + '</button></li>').join('') + '</ol>'
         : '<p class="muted small">No one is scheduled.</p>') +
@@ -697,7 +704,7 @@
       const r = rmap.get(it.id) || {};
       return {
         uid: A.weekId + '-' + it.id + '-host', start: utcOf(it.date, it.start), end: utcOf(it.date, it.end),
-        title: 'Meeting: ' + it.name,
+        title: it.name + ' / ' + (A.settings.name || 'Me'), // same title the student's invite has
         desc: ['Topic: ' + (r.topic || ''), 'Time needed: ' + M.fmtDuration(r.duration || 0), r.email ? 'Email: ' + r.email : ''].filter(Boolean).join('\n'),
       };
     });
@@ -721,6 +728,7 @@
   async function refresh(msg) {
     const id = A.weekId, seq = loadSeq;
     setBusy(true);
+    loadBusy(id, true);
     try {
       const d = await M.api.adminLoad(A.key, id);
       if (!stillOn(id, seq)) return;
@@ -760,7 +768,7 @@
   // ───────────── events from your calendars (drawn as solid blocks on the grid) ─────────────
   async function loadBusy(id, fresh) {
     if (M.DEMO || (A.busy[id] && (!fresh || A.busy[id].loading))) return;
-    A.busy[id] = { list: [], errors: [], loading: true };
+    A.busy[id] = { list: (A.busy[id] && A.busy[id].list) || [], errors: [], loading: true }; // old events stay up while refreshing
     let entry;
     try {
       const d = await M.api.busy(A.key, id, fresh); // the server keeps answers for 10 minutes unless fresh
@@ -770,20 +778,31 @@
       entry = { list: [], errors: /unknown action/i.test(e.message) ? [] : [{ id: '', reason: e.message }] };
     }
     A.busy[id] = entry;
-    if (A.weekId === id && A.tab === 'avail') {
-      renderBusyBlocks();
-      const lg = document.getElementById('busy-legend');
-      if (lg) { lg.innerHTML = busyLegend(); lg.classList.toggle('warn', !!entry.errors.length); }
-    }
+    if (A.weekId !== id) return;
+    if (A.tab === 'resp' && A.view === 'schedule' && A.schedule && !document.querySelector('.cal.grabbing')) { render(); return; } // list notes overlaps
+    renderBusyBlocks();
+    const lg = document.getElementById('busy-legend');
+    if (lg) { lg.innerHTML = busyLegend(); lg.classList.toggle('warn', !!entry.errors.length); }
   }
 
+  // Your calendar events that overlap date start..end (minutes).
+  function eventsDuring(date, start, end) {
+    const b = A.busy[A.weekId];
+    if (!b || !b.list.length) return [];
+    const s0 = date + 'T' + M.fromMin(start), e0 = end >= 1440 ? M.addDays(date, 1) + 'T00:00' : date + 'T' + M.fromMin(end);
+    return b.list.filter((ev) => ev.start < e0 && ev.end > s0);
+  }
+  const hasCalendars = () => !M.DEMO && !!String((A.settings && A.settings.calendars) || '').trim();
+
   // One block per event (split at midnight), positioned over the day's column.
+  // On the Responses grid they're see-through outlines, so the heatmap and meetings show beneath.
   function renderBusyBlocks() {
-    const cal = document.querySelector('.cal.paint');
+    const cal = document.querySelector('#grid .cal');
     if (!cal) return;
     cal.querySelectorAll('.bz').forEach((el) => el.remove());
+    const paint = cal.classList.contains('paint');
     const b = A.busy[A.weekId];
-    if (!b || !b.list.length) return;
+    if (!b || !b.list.length || (!paint && !A.showCal)) return;
     const r0 = Number(cal.dataset.start), r1 = Number(cal.dataset.end), inc = Number(cal.dataset.inc), rh = Number(cal.dataset.rh);
     const px = (min) => ((min - r0) / inc) * rh;
     cal.querySelectorAll('.col').forEach((col) => {
@@ -802,11 +821,20 @@
         el.dataset.s = M.slotKey(d, s0);
         el.dataset.e = d + 'T' + M.fromMin(e0);
         el.innerHTML = '<span class="bz-t">' + esc(ev.title || 'Busy') + '</span>' +
-          (h >= 26 ? '<span class="bz-time">' + esc(M.fmtRange(s0, e0)) + '</span>' : '');
+          (paint && h >= 26 ? '<span class="bz-time">' + esc(M.fmtRange(s0, e0)) + '</span>' : '');
         col.appendChild(el);
       });
     });
-    updateBusyConflicts();
+    if (paint) updateBusyConflicts(); else markMeetingClashes(cal);
+  }
+  // Schedule view: red edge on events that overlap a scheduled meeting.
+  function markMeetingClashes(cal) {
+    const items = A.view === 'schedule' && A.schedule ? A.schedule.items : [];
+    cal.querySelectorAll('.bz').forEach((el) => {
+      const s0 = el.dataset.s, e0 = el.dataset.e;
+      el.classList.toggle('conflict', items.some((it) =>
+        it.date + 'T' + M.fromMin(it.start) < e0 && (it.end >= 1440 ? M.addDays(it.date, 1) + 'T00:00' : it.date + 'T' + M.fromMin(it.end)) > s0));
+    });
   }
   // Red edge on events that overlap times you're offering.
   function updateBusyConflicts() {
@@ -904,6 +932,7 @@
       paintResp(cal);
       attachTooltip(cal);
       if (A.view === 'schedule' && A.schedule) { cal.classList.add('sched'); attachMove(cal); }
+      if (!A.busy[A.weekId]) loadBusy(A.weekId); else renderBusyBlocks();
     }
   }
 
@@ -993,6 +1022,8 @@
         const not = A.responses.map((r) => r.name).filter((n) => !names.includes(n));
         if (names.length && not.length) html += '<br><span class="dim">Not: ' + not.map(esc).join(', ') + '</span>';
       }
+      const evs = eventsDuring(d, m, m + A.week.increment);
+      if (evs.length) html += '<br><span class="tip-ev">Your calendar: ' + evs.map((ev) => esc(ev.title || 'Busy')).join(', ') + '</span>';
       tip.innerHTML = html;
       tip.hidden = false;
       tip.style.left = Math.max(8, Math.min(e.clientX + 14, window.innerWidth - tip.offsetWidth - 8)) + 'px';
@@ -1151,6 +1182,11 @@
         A.draft.open = !A.draft.open;
         el.setAttribute('aria-checked', A.draft.open);
         markDirty();
+        return;
+      case 'toggle-cal':
+        A.showCal = !A.showCal;
+        M.store.set('meet-admin-showcal', A.showCal);
+        render();
         return;
       case 'busy-refresh': {
         loadBusy(A.weekId, true); // replaces this week's events with a loading entry right away
