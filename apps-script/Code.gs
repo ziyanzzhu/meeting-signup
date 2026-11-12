@@ -217,18 +217,37 @@ function forgetNow_(keys) {
 // ───────────── calendar events for your admin grid ─────────────
 // Calendars shared with "See all event details" (and your own) return event titles.
 // Calendars shared as free/busy only fall back to plain "Busy" blocks.
+// Answers are kept for 10 minutes so switching weeks doesn't wait on Google Calendar. The cache key
+// includes your calendar list and time zone, so changing Settings starts fresh. Answers with errors
+// aren't kept, and the admin page's Refresh link sends fresh: true to skip the cache.
+const BUSY_CACHE_SECONDS = 600;
 function busy_(req) {
   const s = loadSettings_();
   const weekId = String(req.weekId || '');
   if (!DATE_RE.test(weekId)) throw new Error('Invalid week.');
   const ids = calendarIds_(s.calendars);
   if (!ids.length) return { ok: true, busy: [], errors: [] };
+  const key = 'busy:' + weekId + ':' + hash_(ids.join(',') + '|' + s.timezone);
+  const c = CacheService.getScriptCache();
+  if (!req.fresh) {
+    try { const hit = safeJson_(c.get(key), null); if (hit && hit.ok) return hit; } catch (e) { /* cache unavailable: fetch */ }
+  }
+  const out = busyFetch_(ids, weekId, s.timezone);
+  if (!out.errors.length) { try { c.put(key, JSON.stringify(out), BUSY_CACHE_SECONDS); } catch (e) { /* too big to cache: fine */ } }
+  return out;
+}
+function hash_(text) { // short, stable cache-key fragment (not for security)
+  let h = 5381;
+  for (let i = 0; i < text.length; i++) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+function busyFetch_(ids, weekId, tz) {
   const timeMin = parseYmd(addDays(weekId, -1)).toISOString();
   const timeMax = parseYmd(addDays(weekId, 8)).toISOString();
   const busy = [], errors = [], busyOnly = [];
   ids.forEach((id) => {
     try {
-      eventsFor_(id, timeMin, timeMax, s.timezone).forEach((ev) => busy.push(ev));
+      eventsFor_(id, timeMin, timeMax, tz).forEach((ev) => busy.push(ev));
     } catch (e) {
       busyOnly.push(id); // no access to details: ask for free/busy instead
     }
@@ -243,7 +262,7 @@ function busy_(req) {
     busyOnly.forEach((id) => {
       const c = (res.calendars || {})[id] || {};
       (c.errors || []).forEach((er) => errors.push({ id: id, reason: er.reason || 'error' }));
-      (c.busy || []).forEach((b) => busy.push({ start: wall_(b.start, s.timezone), end: wall_(b.end, s.timezone), title: '' }));
+      (c.busy || []).forEach((b) => busy.push({ start: wall_(b.start, tz), end: wall_(b.end, tz), title: '' }));
     });
   }
   return { ok: true, busy: busy, errors: errors };

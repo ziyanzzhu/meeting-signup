@@ -418,7 +418,7 @@
     confirm: (key, weekId, items) => call('confirm', { key: key, weekId: weekId, items: items }),
     saveWeek: (key, week) => call('saveWeek', { key: key, week: week, site: siteBase() }),
     saveSettings: (key, settings) => call('saveSettings', { key: key, settings: settings, site: siteBase() }),
-    busy: (key, weekId) => call('busy', { key: key, weekId: weekId }),
+    busy: (key, weekId, fresh) => call('busy', { key: key, weekId: weekId, fresh: !!fresh }),
     deleteResponse: (key, weekId, id) => call('deleteResponse', { key: key, weekId: weekId, id: id }),
   };
 

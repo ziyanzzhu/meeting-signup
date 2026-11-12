@@ -758,12 +758,12 @@
   }
 
   // ───────────── events from your calendars (drawn as solid blocks on the grid) ─────────────
-  async function loadBusy(id) {
-    if (M.DEMO || A.busy[id]) return;
+  async function loadBusy(id, fresh) {
+    if (M.DEMO || (A.busy[id] && (!fresh || A.busy[id].loading))) return;
     A.busy[id] = { list: [], errors: [], loading: true };
     let entry;
     try {
-      const d = await M.api.busy(A.key, id);
+      const d = await M.api.busy(A.key, id, fresh); // the server keeps answers for 10 minutes unless fresh
       entry = { list: d.busy || [], errors: d.errors || [] };
     } catch (e) {
       // An older backend without calendar support answers "Unknown action": just show nothing.
@@ -823,6 +823,7 @@
     });
   }
   function busyErrors() { return (A.busy[A.weekId] || {}).errors || []; }
+  const BUSY_REFRESH = '<button type="button" class="linkbtn" data-act="busy-refresh" title="Calendar events are kept for up to 10 minutes">Refresh</button>';
   function busyLegend() {
     const b = A.busy[A.weekId];
     if (!b || b.loading) return '';
@@ -831,10 +832,10 @@
       const msg = e.reason === 'notFound' || e.reason === 'notAuthorized'
         ? 'Can’t see ' + e.id + '. Share it with this Google account (“See all event details” shows titles)'
         : e.reason;
-      return icon('calendar') + '<span title="' + esc(msg) + '">' + esc(msg.length > 90 ? msg.slice(0, 90) + '…' : msg) + '</span>';
+      return icon('calendar') + '<span title="' + esc(msg) + '">' + esc(msg.length > 90 ? msg.slice(0, 90) + '…' : msg) + '</span>' + BUSY_REFRESH;
     }
-    if (!b.list.length) return '';
-    return '<span class="sw"></span>Shaded blocks are events on your calendar. A red edge means one overlaps time you’re offering.';
+    if (!b.list.length) return String(A.settings.calendars || '').trim() ? '<span>No calendar events this week.</span>' + BUSY_REFRESH : '';
+    return '<span class="sw"></span><span>Shaded blocks are events on your calendar. A red edge means one overlaps time you’re offering.</span>' + BUSY_REFRESH;
   }
 
   // ───────────── week grid ─────────────
@@ -1151,6 +1152,13 @@
         el.setAttribute('aria-checked', A.draft.open);
         markDirty();
         return;
+      case 'busy-refresh': {
+        loadBusy(A.weekId, true); // replaces this week's events with a loading entry right away
+        renderBusyBlocks();
+        const lg = document.getElementById('busy-legend');
+        if (lg) { lg.classList.remove('warn'); lg.innerHTML = '<span>Checking your calendar…</span>'; }
+        return;
+      }
       case 'refresh':
         return refresh();
       case 'samples':

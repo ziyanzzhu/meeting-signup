@@ -387,6 +387,7 @@ select.input { padding-right: 28px; }
 .busy-legend { display: flex; align-items: center; gap: 6px; padding: 8px 14px 0; font-size: 12px; color: var(--muted); }
 .busy-legend:empty { display: none; }
 .busy-legend.warn { color: var(--warn); }
+.busy-legend .linkbtn { margin-left: auto; font-size: 12px; flex: none; }
 .busy-legend .sw { width: 16px; height: 11px; flex: none; border-radius: 3px; background: var(--busy-bg); box-shadow: inset 3px 0 0 var(--busy-bar), 0 0 0 1px var(--border); }
 .field .help { font-size: 12px; color: var(--muted); line-height: 1.45; }
 .cal.small .lbl { top: 1px; font-size: 10.5px; line-height: 1.15; }
