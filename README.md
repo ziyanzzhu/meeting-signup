@@ -45,9 +45,9 @@ Use a **personal Gmail account**. University-managed Google accounts often block
 
 ## Calendar busy times and email alerts
 
-- **Busy times.** The availability grid shows gray striped blocks wherever your Google Calendar is busy. Only free/busy is read, never event titles. If a time you offer overlaps a busy block, it gets red stripes. The calendars it checks are listed under ⚙︎ Settings → *Calendars to show as busy*. `primary` means the calendar of the Google account that owns the Apps Script.
+- **Your calendar on the grid.** Events from your Google Calendar appear on the availability grid as gray blocks, with titles where the calendar shares event details and as "Busy" where it shares free/busy only. An event that overlaps time you're offering gets a red edge. Titles appear only on your admin page and are never saved in the browser. The calendars it checks are listed under ⚙︎ Settings → *Calendars to show as busy*. `primary` means the calendar of the Google account that owns the Apps Script.
 - **Adding a work or university calendar.**
-  1. In that calendar's Google Calendar settings, go to **Share with specific people** and add the Google account that owns the script with **See only free/busy**.
+  1. In that calendar's Google Calendar settings, go to **Share with specific people** and add the Google account that owns the script. Choose **See all event details** to see titles, or **See only free/busy** for busy blocks only.
   2. Copy the calendar's ID (under *Integrate calendar*; for your main calendar it's your email address).
   3. Add the ID to the Settings list, separated by a comma.
   4. If the site can't read a calendar, an orange note appears above the grid.

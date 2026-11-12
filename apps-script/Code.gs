@@ -193,30 +193,58 @@ function forgetNow_(keys) {
   } catch (e) { /* ignore */ }
 }
 
-// ───────────── calendar busy times (free/busy only: no event titles) ─────────────
+// ───────────── calendar events for your admin grid ─────────────
+// Calendars shared with "See all event details" (and your own) return event titles.
+// Calendars shared as free/busy only fall back to plain "Busy" blocks.
 function busy_(req) {
   const s = loadSettings_();
   const weekId = String(req.weekId || '');
   if (!DATE_RE.test(weekId)) throw new Error('Invalid week.');
   const ids = calendarIds_(s.calendars);
   if (!ids.length) return { ok: true, busy: [], errors: [] };
-  let res;
-  try {
-    res = Calendar.Freebusy.query({
-      timeMin: parseYmd(addDays(weekId, -1)).toISOString(),
-      timeMax: parseYmd(addDays(weekId, 8)).toISOString(),
-      items: ids.map((id) => ({ id: id })),
-    });
-  } catch (e) {
-    return { ok: true, busy: [], errors: [{ id: '', reason: 'Calendar isn’t connected: ' + ((e && e.message) || e) }] };
-  }
-  const busy = [], errors = [];
+  const timeMin = parseYmd(addDays(weekId, -1)).toISOString();
+  const timeMax = parseYmd(addDays(weekId, 8)).toISOString();
+  const busy = [], errors = [], busyOnly = [];
   ids.forEach((id) => {
-    const c = (res.calendars || {})[id] || {};
-    (c.errors || []).forEach((er) => errors.push({ id: id, reason: er.reason || 'error' }));
-    (c.busy || []).forEach((b) => busy.push({ start: wall_(b.start, s.timezone), end: wall_(b.end, s.timezone) }));
+    try {
+      eventsFor_(id, timeMin, timeMax, s.timezone).forEach((ev) => busy.push(ev));
+    } catch (e) {
+      busyOnly.push(id); // no access to details: ask for free/busy instead
+    }
   });
+  if (busyOnly.length) {
+    let res;
+    try {
+      res = Calendar.Freebusy.query({ timeMin: timeMin, timeMax: timeMax, items: busyOnly.map((id) => ({ id: id })) });
+    } catch (e) {
+      return { ok: true, busy: busy, errors: [{ id: '', reason: 'Calendar isn’t connected: ' + ((e && e.message) || e) }] };
+    }
+    busyOnly.forEach((id) => {
+      const c = (res.calendars || {})[id] || {};
+      (c.errors || []).forEach((er) => errors.push({ id: id, reason: er.reason || 'error' }));
+      (c.busy || []).forEach((b) => busy.push({ start: wall_(b.start, s.timezone), end: wall_(b.end, s.timezone), title: '' }));
+    });
+  }
   return { ok: true, busy: busy, errors: errors };
+}
+
+function eventsFor_(id, timeMin, timeMax, tz) {
+  const out = [];
+  let pageToken;
+  do {
+    const res = Calendar.Events.list(id, {
+      timeMin: timeMin, timeMax: timeMax, singleEvents: true, orderBy: 'startTime', maxResults: 250, pageToken: pageToken,
+    });
+    (res.items || []).forEach((ev) => {
+      if (ev.status === 'cancelled' || ev.transparency === 'transparent') return; // marked "free"
+      if (!ev.start || !ev.start.dateTime || !ev.end || !ev.end.dateTime) return;  // all-day events
+      const me = (ev.attendees || []).find((a) => a.self);
+      if (me && me.responseStatus === 'declined') return;
+      out.push({ start: wall_(ev.start.dateTime, tz), end: wall_(ev.end.dateTime, tz), title: clip(ev.summary || '', 120) });
+    });
+    pageToken = res.nextPageToken;
+  } while (pageToken && out.length < 1000);
+  return out;
 }
 function calendarIds_(text) {
   return uniq(String(text || '').split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean)).slice(0, 10);

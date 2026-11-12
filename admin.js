@@ -505,8 +505,7 @@
     }
   }
 
-  // ───────────── busy times from your calendars ─────────────
-  const NO_BUSY = new Set();
+  // ───────────── events from your calendars (drawn as solid blocks on the grid) ─────────────
   async function loadBusy(id) {
     if (M.DEMO || A.busy[id]) return;
     A.busy[id] = { list: [], errors: [], loading: true };
@@ -520,31 +519,56 @@
     }
     A.busy[id] = entry;
     if (A.weekId === id && A.tab === 'avail') {
-      document.querySelectorAll('.cal .col').forEach(paintAvailCol);
+      renderBusyBlocks();
       const lg = document.getElementById('busy-legend');
       if (lg) { lg.innerHTML = busyLegend(); lg.classList.toggle('warn', !!entry.errors.length); }
     }
   }
-  // Grid cells (at this week's slot length) that overlap a busy block.
-  function busySet() {
+
+  // One block per event (split at midnight), positioned over the day's column.
+  function renderBusyBlocks() {
+    const cal = document.querySelector('.cal.paint');
+    if (!cal) return;
+    cal.querySelectorAll('.bz').forEach((el) => el.remove());
     const b = A.busy[A.weekId];
-    if (!b || !b.list.length) return NO_BUSY;
-    const inc = A.draft.increment;
-    if (b.set && b.inc === inc) return b.set;
-    const set = new Set();
-    for (let i = 0; i < 7; i++) {
-      const d = M.addDays(A.weekId, i);
-      const dayStart = d + 'T00:00', dayEnd = M.addDays(d, 1) + 'T00:00';
-      b.list.forEach((x) => {
-        if (x.end <= dayStart || x.start >= dayEnd) return;
-        for (let m = 0; m < 1440; m += inc) {
-          const s0 = M.slotKey(d, m), s1 = d + 'T' + M.fromMin(m + inc);
-          if (x.start < s1 && x.end > s0) set.add(s0);
-        }
+    if (!b || !b.list.length) return;
+    const r0 = Number(cal.dataset.start), r1 = Number(cal.dataset.end), inc = Number(cal.dataset.inc), rh = Number(cal.dataset.rh);
+    const px = (min) => ((min - r0) / inc) * rh;
+    cal.querySelectorAll('.col').forEach((col) => {
+      const d = col.dataset.date, next = M.addDays(d, 1);
+      b.list.forEach((ev) => {
+        if (ev.end <= d + 'T00:00' || ev.start >= next + 'T00:00') return;
+        const s0 = ev.start.slice(0, 10) < d ? 0 : M.toMin(ev.start.slice(11, 16));
+        const e0 = ev.end.slice(0, 10) > d ? 1440 : M.toMin(ev.end.slice(11, 16));
+        const a = Math.max(s0, r0), z = Math.min(e0, r1);
+        if (z <= a) return;
+        const h = px(z) - px(a);
+        const el = document.createElement('div');
+        el.className = 'bz' + (h < 26 ? ' short' : '');
+        el.style.top = px(a) + 'px';
+        el.style.height = Math.max(h - 2, 6) + 'px';
+        el.dataset.s = M.slotKey(d, s0);
+        el.dataset.e = d + 'T' + M.fromMin(e0);
+        el.innerHTML = '<span class="bz-t">' + esc(ev.title || 'Busy') + '</span>' +
+          (h >= 26 ? '<span class="bz-time">' + esc(M.fmtRange(s0, e0)) + '</span>' : '');
+        col.appendChild(el);
       });
-    }
-    b.set = set; b.inc = inc;
-    return set;
+    });
+    updateBusyConflicts();
+  }
+  // Red edge on events that overlap times you're offering.
+  function updateBusyConflicts() {
+    const inc = A.draft.increment;
+    document.querySelectorAll('.cal.paint .bz').forEach((el) => {
+      const s0 = el.dataset.s, e0 = el.dataset.e;
+      let hit = false;
+      A.draft.slots.forEach((k) => {
+        if (hit) return;
+        const [d, m] = M.splitKey(k);
+        if (k < e0 && d + 'T' + M.fromMin(m + inc) > s0) hit = true;
+      });
+      el.classList.toggle('conflict', hit);
+    });
   }
   function busyErrors() { return (A.busy[A.weekId] || {}).errors || []; }
   function busyLegend() {
@@ -553,12 +577,12 @@
     if (b.errors.length) {
       const e = b.errors[0];
       const msg = e.reason === 'notFound' || e.reason === 'notAuthorized'
-        ? 'Can’t see ' + e.id + '. Share it with this Google account (free/busy is enough)'
+        ? 'Can’t see ' + e.id + '. Share it with this Google account (“See all event details” shows titles)'
         : e.reason;
-      return icon('calendar') + '<span title="' + esc(msg) + '">' + esc(msg.length > 70 ? msg.slice(0, 70) + '…' : msg) + '</span>';
+      return icon('calendar') + '<span title="' + esc(msg) + '">' + esc(msg.length > 90 ? msg.slice(0, 90) + '…' : msg) + '</span>';
     }
     if (!b.list.length) return '';
-    return '<span class="sw"></span>Busy on your calendar';
+    return '<span class="sw"></span>Gray blocks are events on your calendar. A red edge means one overlaps time you’re offering.';
   }
 
   // ───────────── week grid ─────────────
@@ -585,7 +609,8 @@
     const days = gridDays(slots);
     const range = gridRange(slots, inc);
     const today = M.localToday();
-    let h = '<div class="cal' + (isAvail ? ' paint' : '') + (inc === 15 ? ' small' : '') + '" style="--days:' + days.length + ';--rh:' + (inc === 15 ? 13 : 24) + 'px">';
+    let h = '<div class="cal' + (isAvail ? ' paint' : '') + (inc === 15 ? ' small' : '') + '" data-start="' + range[0] + '" data-end="' + range[1] +
+      '" data-inc="' + inc + '" data-rh="' + (inc === 15 ? 13 : 24) + '" style="--days:' + days.length + ';--rh:' + (inc === 15 ? 13 : 24) + 'px">';
     h += '<div class="cal-head"><div class="tzc" title="Times in ' + esc(M.tzLabel(A.settings.timezone)) + '">' + esc(M.tzShort(A.settings.timezone)) + '</div>' + days.map((d) =>
       '<div class="dh' + (d === today ? ' today' : '') + '">' + M.DOW[M.dow(d)] + '<b>' + Number(d.slice(8)) + '</b></div>').join('') + '</div>';
     h += '<div class="cal-body"><div class="tcol">';
@@ -604,7 +629,7 @@
     const cal = host.firstChild;
     if (isAvail) {
       cal.querySelectorAll('.col').forEach(paintAvailCol);
-      if (!A.busy[A.weekId]) loadBusy(A.weekId);
+      if (!A.busy[A.weekId]) loadBusy(A.weekId); else renderBusyBlocks();
       M.drag.attach(cal.querySelector('.cal-body'), {
         selector: '.cell',
         touch: !coarse,
@@ -613,7 +638,7 @@
           A.dirty = true;
           if (on) A.draft.slots.add(el.dataset.k); else A.draft.slots.delete(el.dataset.k);
         },
-        after: () => cal.querySelectorAll('.col').forEach(paintAvailCol),
+        after: () => { cal.querySelectorAll('.col').forEach(paintAvailCol); updateBusyConflicts(); },
         onEnd: () => { markDirty(); updateStats(); },
       });
     } else {
@@ -623,15 +648,13 @@
   }
 
   function paintAvailCol(col) {
-    const cells = col.children, inc = A.draft.increment;
+    const cells = col.querySelectorAll(':scope > .cell'), inc = A.draft.increment;
     const on = (i) => i >= 0 && i < cells.length && A.draft.slots.has(cells[i].dataset.k);
-    const bs = busySet();
     for (let i = 0; i < cells.length; i++) {
       const c = cells[i], o = on(i);
       c.classList.toggle('on', o);
       c.classList.toggle('top', o && !on(i - 1));
       c.classList.toggle('bot', o && !on(i + 1));
-      c.classList.toggle('busy', bs.has(c.dataset.k));
       let lbl = '';
       if (o && !on(i - 1)) {
         let j = i;
@@ -660,7 +683,7 @@
     const grp = (k) => (sched && sched.has(k) ? sched.get(k) : offered.has(k) ? 'free' : null);
 
     cal.querySelectorAll('.col').forEach((col) => {
-      const cells = col.children;
+      const cells = col.querySelectorAll(':scope > .cell');
       for (let i = 0; i < cells.length; i++) {
         const c = cells[i], k = c.dataset.k, g = grp(k);
         c.classList.remove('offer', 'as', 'top', 'bot', 'mine');
@@ -758,7 +781,7 @@
           (M.DEMO ? '' :
             '<div class="field"><label for="s-cal">Calendars to show as busy</label>' +
               '<input class="input" id="s-cal" name="calendars" maxlength="500" value="' + esc(s.calendars) + '" placeholder="primary">' +
-              '<span class="help">“primary” is this Google account’s own calendar. To add your BC calendar, share it with this Google account (“See only free/busy”), then add its address here. Separate with commas.</span></div>' +
+              '<span class="help">“primary” is this Google account’s own calendar. To add another calendar (e.g. BC), share it with this Google account, then add its address here, separated by commas. Share with “See all event details” to see event titles, or “See only free/busy” to see just busy blocks.</span></div>' +
             '<label class="check"><input type="checkbox" name="notify"' + (s.notify ? ' checked' : '') + '> Email me when a student responds</label>') +
         '</div>' +
         '<div class="dlg-foot">' +
