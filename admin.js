@@ -471,7 +471,7 @@
       (sc.partial ? '<p class="muted small" style="margin-top:10px">Big group: this is the best arrangement found quickly, and a better one may exist.</p>' : '') +
       '<button class="btn primary block" data-act="confirm" style="margin-top:14px"' + (toSend || cancels.length ? '' : ' disabled') + '>' +
         (toSend ? icon('check') + 'Confirm & email ' + toSend + ' student' + (toSend === 1 ? '' : 's')
-          : cancels.length ? icon('check') + 'Cancel ' + cancels.length + ' invitation' + (cancels.length === 1 ? '' : 's') : 'Everyone has been emailed') + '</button>' +
+          : cancels.length ? icon('check') + 'Cancel ' + cancels.length + ' invitation' + (cancels.length === 1 ? '' : 's') : sc.items.length ? 'Everyone has been emailed' : 'Nothing to send') + '</button>' +
       '<p class="muted small" style="margin-top:8px">' + (invitesOn()
         ? 'Each student gets an email and a Google Calendar invitation' + (A.settings.inviteCopy ? ' (' + esc(A.settings.inviteCopy) + ' is invited too)' : '') + '. If you move someone later, only they get an update.'
         : 'Each student gets their time by email with a calendar file. If you move someone later, only they get an update.') + '</p>' +
@@ -693,7 +693,7 @@
   // ── confirm & export ──
   async function confirmSchedule() {
     const sc = A.schedule;
-    if (!sc || !sc.items.length) return;
+    if (!sc) return; // an empty schedule can still have invitations to cancel
     const toSend = sc.items.filter((it) => ['new', 'changed', 'invite'].includes(statusOf(it)));
     const cancels = toCancel();
     if (!toSend.length && !cancels.length) { M.toast('Everyone already has their current time.'); return; }
@@ -787,7 +787,7 @@
       if (A.focus === id) A.focus = null;
       if (A.schedule) { // take just them out; the rest of your schedule (and any unsent moves) stays
         const items = A.schedule.items.filter((it) => it.id !== id), unfit = A.schedule.unfit.filter((u) => u.id !== id);
-        A.schedule = items.length || unfit.length ? finalizeSchedule(items, unfit, A.schedule.partial) : null;
+        A.schedule = items.length || unfit.length || confirmedItems().length ? finalizeSchedule(items, unfit, A.schedule.partial) : null;
       }
       keepView();
       cacheNow();
